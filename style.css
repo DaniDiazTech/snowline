@@ -2340,6 +2340,7 @@ kbd {
 }
 .modal__head {
   display: flex;
+  flex: none;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -2357,6 +2358,7 @@ kbd {
 
 .tabs {
   display: flex;
+  flex: none; /* a scrollable flex item may shrink to nothing: keep the tabs whole on short screens */
   gap: 4px;
   margin: 18px 0 8px;
   padding-bottom: 10px;
