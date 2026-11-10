@@ -241,7 +241,7 @@ export class Renderer {
     // ---- screen-space overlays ----
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.weather.drawFog(ctx, atm, L);
-    this.effects.drawForeground(ctx, cam, P, L, course.startX);
+    this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x));
     this.weather.drawPrecip(ctx, atm, L);
     const boostT = local.boostLevel >= 2 ? 0.35 + local.boostLevel * 0.2 : local.boostLevel ? 0.25 : 0;
     this.boostFx += (boostT - this.boostFx) * (1 - Math.exp(-dt * 5));
@@ -254,7 +254,7 @@ export class Renderer {
       for (const v of others) {
         const sp = cam.worldToScreen(v.x, v.y);
         if (sp.x < -40 || sp.x > w + 40 || sp.y < -40 || sp.y > h + 40) continue;
-        const ty = sp.y - 64 * cam.scale;
+        const ty = sp.y - 54 * cam.scale;
         const near = Math.hypot(sp.x - lp.x, ty - (lp.y - 30 * cam.scale));
         const a = smoothstep(60, 110, near);
         this.riders.drawTag(ctx, v, sp.x, ty, a, P);
@@ -294,7 +294,7 @@ export class Renderer {
       glow: this.glowFn || (this.glowFn = (x, y, r, a, c) => this.pushGlow(x, y, r, a, c)),
     };
     // particle colours: 0 snow, 1 shade, 2 rock, 3 warm, 4 white, 5 gold, 6 local player
-    P.particleColors = [rgba(mix(snow, [255, 255, 255], 0.3)), rgba(mix(snow, shade, 0.5)), rgba(P.rockDark), rgba([255, 170, 70]), '#ffffff', '#ffd75a', this.prevLocal?.color || '#ffffff'];
+    P.particleColors = [rgba(mix(snow, [255, 255, 255], 0.3)), rgba(mix(snow, shade, 0.5)), rgba(P.rockDark), rgba([255, 170, 70]), '#ffffff', '#ffd75a', this.prevLocal?.color || '#ffffff', ...FESTIVE.map((c) => rgba(mix(c, sil, 0.1 + 0.3 * night)))];
     P.accentGlow = accent;
     return P;
   }
@@ -330,6 +330,7 @@ export class Renderer {
 
   handleEvents(events, local, P) {
     const ps = this.particles;
+    const course = this.course;
     const cam = this.camera;
     for (const e of events) {
       const d = e.data || {};
@@ -388,6 +389,20 @@ export class Renderer {
         case SimEvent.GRIND_START:
           for (let i = 0; i < 10; i++) ps.spawn(PK.SPARK, local.x, local.y, local.vx * 0.3 + ps.rand(-120, 80), ps.rand(-200, -40), ps.rand(0.2, 0.45), 1.4, 3, 900, 1);
           break;
+        case SimEvent.FINISH: {
+          // confetti from the finish arch banner, mostly in the rider's colour
+          const ax = course.finishX + 75;
+          const ay = course.heightAt(ax) - 125;
+          for (let i = 0; i < 90; i++) {
+            const a = -Math.PI / 2 + ps.rand(-1.1, 1.1);
+            const sp = ps.rand(120, 420);
+            ps.spawn(PK.CONFETTI, ax + ps.rand(-70, 70), ay + ps.rand(-6, 6), Math.cos(a) * sp + local.vx * 0.2, Math.sin(a) * sp, ps.rand(1.6, 2.8), ps.rand(4, 7), i % 3 === 0 ? 6 : 7 + (i % 6), 260, 1.6);
+          }
+          for (let i = 0; i < 18; i++) ps.spawn(PK.SPARKLE, ax + ps.rand(-80, 80), ay + ps.rand(-40, 20), ps.rand(-40, 40), ps.rand(-60, 0), ps.rand(0.5, 1.1), ps.rand(3, 6), 4, 0, 2);
+          this.burst(local.x, local.y, 24, 220, 0);
+          this.pulse = Math.max(this.pulse, 0.35);
+          break;
+        }
         case SimEvent.RESPAWN:
           ps.spawn(PK.RING, x, y - 20, 0, 0, 0.6, 50, 4, 0, 0);
           this.burst(x, y, 16, 120, 0);

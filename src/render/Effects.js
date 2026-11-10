@@ -7,7 +7,7 @@
  * The blurred pine is rendered once as a white mask (shadow-blur trick, works
  * in every browser) and re-tinted only when the silhouette colour drifts.
  */
-import { clamp } from '../math/utils.js';
+import { clamp, smoothstep } from '../math/utils.js';
 import { hash01 } from './DayCycle.js';
 import { colorDistance, hex, mix, rgba } from './color.js';
 import { makeCanvas, sizeCanvas } from './canvas.js';
@@ -91,7 +91,7 @@ export class Effects {
   }
 
   /** Big dark blurred pines sweeping past in the foreground. */
-  drawForeground(ctx, cam, P, L, startX) {
+  drawForeground(ctx, cam, P, L, startX, riderSX) {
     const col = mix(P.deep, P.sil, 0.15);
     this.tintForeground(col);
     const k = cam.scale * FG_PAR;
@@ -100,13 +100,19 @@ export class Effects {
     const fx0 = cam.x + (-sprW - cam.anchorX) / k;
     const fx1 = cam.x + (L.w + sprW - cam.anchorX) / k;
     for (let i = Math.floor(fx0 / FG_SPACING); i <= Math.ceil(fx1 / FG_SPACING); i++) {
-      if (hash01(i, 4242) < 0.7) continue;
+      if (hash01(i, 4242) < 0.78) continue;
       const fx = i * FG_SPACING + hash01(i, 4243) * FG_SPACING * 0.5;
       if (fx < startX + 800) continue; // keep the start line clear
       const sx = cam.anchorX + (fx - cam.x) * k;
       const s = 0.8 + 0.4 * hash01(i, 4244);
       const top = L.h - sprH * s * (0.62 + 0.18 * hash01(i, 4245));
-      ctx.globalAlpha = 0.92;
+      // never over the rider (±120 px) nor over the HUD column on the left: fade out near them
+      const half = sprW * s * 0.36; // the dense part of the blurred tree
+      const gapRider = Math.abs(sx - riderSX) - half - 120;
+      const gapHud = sx - half - 330;
+      const a = 0.92 * smoothstep(0, 160, Math.min(gapRider, gapHud));
+      if (a <= 0.01) continue;
+      ctx.globalAlpha = a;
       ctx.drawImage(this.fgTint, sx - (sprW * s) / 2, top, sprW * s, sprH * s);
     }
     ctx.globalAlpha = 1;

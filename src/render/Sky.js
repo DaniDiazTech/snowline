@@ -44,8 +44,8 @@ export class Sky {
         y: slot === 0 ? r.range(0.06, 0.34) : r.range(0.36, 0.62) + slot * 0.03,
         len: r.range(0.12, 0.3) * (slot === 0 ? 1.2 : 0.8),
         thick: r.range(0.014, 0.024) * (slot === 0 ? 1 : 1.3),
-        alpha: slot === 0 ? r.range(0.45, 0.75) : r.range(0.12, 0.26),
-        speed: r.range(4, 12),
+        alpha: slot === 0 ? r.range(0.35, 0.6) : r.range(0.1, 0.22),
+        speed: r.range(9, 22),
         par: slot === 0 ? 0.006 : 0.01 + slot * 0.025,
         bumps,
         strands,
@@ -179,6 +179,12 @@ export class Sky {
       const x = wrap(c.u * span + L.t * c.speed - L.camX * L.baseScale * c.par, span) - len;
       const y = c.y * L.h + (slot === 0 ? 0 : L.vshift * c.par * 8);
       ctx.globalAlpha = clamp(c.alpha * amt, 0, 0.85);
+      // subtle vertical gradient: solid top, bottom dissolving into the sky
+      const g = ctx.createLinearGradient(0, y - th * 2.2, 0, y + th * 0.6);
+      g.addColorStop(0, rgba(base, 1));
+      g.addColorStop(0.55, rgba(base, 0.85));
+      g.addColorStop(1, rgba(base, 0.35));
+      ctx.fillStyle = g;
       ctx.beginPath();
       ctx.roundRect(x, y - th, len, th, th / 2);
       for (const b of c.bumps) {

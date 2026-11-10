@@ -41,11 +41,21 @@ export const COURSE = Object.freeze({
   ZONE_MIN_M: 260,
   ZONE_MAX_M: 460,
   ZONE_BLEND: 800, // grade blend half-width across zone borders
-  GRADE: { slopes: 0.215, forest: 0.205, village: 0.16, ridge: 0.25 },
-  ROLL_AMP: { slopes: 0.17, forest: 0.15, village: 0.09, ridge: 0.19 },
-  GRADE_RAMP: 0.03, // extra grade by the end of the course (difficulty ramp)
-  LONG_AMP: 0.06, // long-wavelength grade variation
-  SLOPE_MIN: -0.07,
+  // Base grade (dy/dx) per biome; the relief below adds on top (its mean is slightly positive).
+  GRADE: { slopes: 0.165, forest: 0.165, village: 0.14, ridge: 0.175 },
+  // Rolling relief: slope deviation amplitude per biome. Two noise layers, hump spacing
+  // ≈ 1500 px and ≈ 560 px, give rounded humps, scooped valleys and shelves (50-250 px of
+  // height relief per 2500 px window).
+  RELIEF_AMP: { slopes: 0.34, forest: 0.38, village: 0.2, ridge: 0.5 },
+  RELIEF_WAVE: [1500, 560], // px per noise lattice unit (long, short layer)
+  RELIEF_MIX: 0.48, // weight of the short layer
+  RELIEF_STEEP: 1.25, // >1 stretches the steep side (short pitches), <1 side stays gentle (long shelves)
+  GRADE_RAMP: 0.02, // extra grade by the end of the course (difficulty ramp)
+  LONG_AMP: 0.05, // very long-wavelength grade variation
+  ROLLER_CHANCE: { slopes: 0.55, forest: 0.5, village: 0.25, ridge: 0.7 }, // per gap between set pieces
+  RELIEF_LO: -0.105, // soft lower bound of the slope (≈ −6°: short gentle uphills)
+  RELIEF_HI: 0.58, // soft upper bound (≈ 30° steep pitches; drop pieces go beyond)
+  SLOPE_MIN: -0.12,
   SLOPE_MAX: 0.75,
   GAP_MIN_M: 60, // breathing room between set pieces (scaled down to 75% at the end)
   GAP_MAX_M: 125,
@@ -81,6 +91,7 @@ export function generateCourse(seed, settings) {
   const rngDecor = createRandom(seed ^ 0x1b873593);
   const noiseRoll = new PerlinNoise1D(seed ^ 0x68e31da4);
   const noiseLong = new PerlinNoise1D(seed ^ 0x3c6ef372);
+  const noiseShort = new PerlinNoise1D(seed ^ 0x4cf5ad43);
 
   const lengthM = COURSE_LENGTHS[set.length] || COURSE_LENGTHS.classic;
   const step = COURSE.SAMPLE_STEP;
@@ -144,7 +155,17 @@ export function generateCourse(seed, settings) {
       pieces.push(piece);
       prevType = piece.type;
       const gap = rngLayout.range(COURSE.GAP_MIN_M, COURSE.GAP_MAX_M) * PX_PER_M * lerp(1, 0.75, d);
-      minorSlots.push({ x0: piece.x1, x1: piece.x1 + gap, d: progressOf(piece.x1) });
+      const slot = { x0: piece.x1, x1: piece.x1 + gap, d: progressOf(piece.x1) };
+      // A roller near the end of the gap: a near-flat shelf that breaks over a rounded
+      // crest into a short steep pitch — the rider floats off the crest at cruise speed.
+      const hb = biomeAt(slot.x1 - 900);
+      if (gap > 1600 && rngLayout.chance(COURSE.ROLLER_CHANCE[hb])) {
+        slot.rollShelf = rngLayout.range(220, 380);
+        slot.rollPitch = rngLayout.range(200, 320);
+        slot.rollSteep = rngLayout.range(0.42, 0.52) + (hb === 'ridge' ? 0.06 : 0);
+        slot.rollX = slot.x1 - 450 - slot.rollPitch - rngLayout.range(0, 250); // crest
+      }
+      minorSlots.push(slot);
       x = piece.x1 + gap;
     }
   }
@@ -159,9 +180,13 @@ export function generateCourse(seed, settings) {
     for (let j = 0; j < cpCount; j++) {
       const x = minX + (j - 1) * COURSE.CP_SPACING;
       const grade = zoneValue(x, COURSE.GRADE) + COURSE.GRADE_RAMP * progressOf(x);
-      const roll = noiseRoll.fbm(x / 760, 3, 0.5) * zoneValue(x, COURSE.ROLL_AMP);
+      const [w0, w1] = COURSE.RELIEF_WAVE;
+      // Perlin 1D rarely leaves ±0.3: scale so the typical range is ≈ ±1.
+      let r = 3 * ((1 - COURSE.RELIEF_MIX) * noiseRoll.noise(x / w0) + COURSE.RELIEF_MIX * noiseShort.noise(x / w1 + 17.3));
+      r = r > 0 ? r * COURSE.RELIEF_STEEP : r * (2 - COURSE.RELIEF_STEEP);
+      const relief = r * zoneValue(x, COURSE.RELIEF_AMP);
       const long = noiseLong.fbm(x / 3400, 2, 0.5) * COURSE.LONG_AMP;
-      cp[j] = clamp(grade + roll + long, -0.03, 0.55);
+      cp[j] = softClamp(grade + relief + long, COURSE.RELIEF_LO, COURSE.RELIEF_HI, 0.04);
     }
     for (let i = 0; i < n; i++) {
       const u = (sx(i) - minX) / COURSE.CP_SPACING + 1;
@@ -187,12 +212,18 @@ export function generateCourse(seed, settings) {
       if (w > 0) slope[i] = lerp(slope[i], target(x, slope[i]), w);
     }
   };
-  const flatten = (a, b, f = 160, lo = 0.12, hi = 0.3) => {
+  /** Pulls the slope over [a, b] toward its (clamped) mean; `strength` < 1 keeps some of the roll. */
+  const flatten = (a, b, f = 160, lo = 0.12, hi = 0.3, strength = 1) => {
     const c = clamp(meanSlope(a, b), lo, hi);
-    shapeSlope(a, b, f, () => c);
+    shapeSlope(a, b, f, (x, v) => lerp(v, c, strength));
   };
 
   for (const p of pieces) applyPieceSlope(p);
+  for (const sl of minorSlots) {
+    if (!sl.rollX) continue;
+    const { rollX: cx, rollShelf, rollPitch, rollSteep } = sl;
+    shapeSlope(cx - rollShelf, cx + rollPitch, 140, (x) => lerp(0.03, rollSteep, smoothstep(cx - 30, cx + 30, x)));
+  }
 
   function applyPieceSlope(p) {
     switch (p.type) {
@@ -205,13 +236,14 @@ export function generateCourse(seed, settings) {
       case 'bunting':
       case 'roofs':
       case 'ice':
-        flatten(p.x0, p.x1, 180, 0.1, 0.26);
+        flatten(p.x0, p.x1, 180, 0.08, 0.26, p.type === 'ice' ? 0.7 : 0.85);
         break;
       case 'campfire':
-        flatten(p.x0, p.x1, 150, 0.1, 0.2);
+        flatten(p.x0, p.x1, 150, 0.08, 0.2, 0.85);
         break;
       case 'rocks':
-        flatten(p.x0, p.x1, 200, 0.12, 0.32);
+        // Rocks sit on the rolling terrain (the crest rule keeps them fair); only soften extremes.
+        flatten(p.x0, p.x1, 200, 0.1, 0.32, 0.35);
         break;
       case 'drop': {
         const { dropX, lipLen, dropLen, steep } = p;
@@ -633,6 +665,13 @@ export function generateCourse(seed, settings) {
     _chasms: Object.freeze(chasms),
     _biomeAt: biomeAt,
   });
+}
+
+/** Smooth clamp (softplus on both sides, width k): continuous slope, no kinks. */
+function softClamp(v, lo, hi, k) {
+  const sp = (z) => (z > 30 ? z : Math.log1p(Math.exp(z)));
+  v = lo + k * sp((v - lo) / k);
+  return hi - k * sp((hi - v) / k);
 }
 
 function typeOrder(t) {

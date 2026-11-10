@@ -1,15 +1,36 @@
 /**
- * Follow camera.
+ * Follow camera (resolution independent).
  *
  * World → screen:  sx = (x - this.x) * this.scale + anchorX
  *                  sy = (y - this.y) * this.scale + anchorY
- * `scale` = baseScale (from the screen size) * zoom. The camera centre is
- * eased towards the rider plus a look-ahead along the velocity; zoom eases
- * out with speed and with height above the ground so big airs show the
- * landing. A crash or respawn never snaps: everything goes through damp().
+ *
+ * Size: the scale is chosen so the rider (RIDER_HEIGHT px, board to head) is a
+ * fixed fraction of the viewport's SHORT side — ≈ 6.5 % at cruising speed,
+ * easing to ≈ 4.5 % at top boosted speed or in big air — and never below
+ * MIN_RIDER_PX css px. Lead time wins over size: the scale is capped so the
+ * ground ahead of the rider is visible for ≥ LEAD_S seconds at the current
+ * speed (this only bites in portrait).
+ *
+ * Framing: x = rider + look-ahead along the velocity. y follows a spatial
+ * average of the SURFACE over a window around/ahead of the rider (so rollers
+ * do not make the camera bob and the ground ahead is framed), raised by part
+ * of the air height in jumps, and clamped so the rider stays in a safe band
+ * (clear of the HUD at the top and bottom). Everything eases (damp), so a
+ * crash or respawn never snaps.
+ *
+ * Modes: race · cinematic (home/lobby: rider ~60 % across, slow drift) ·
+ * finish (FINISHED: rider centred ~50 % / 45 % for the results screen).
  */
-import { clamp, damp, smoothstep } from '../math/utils.js';
+import { clamp, damp, lerp, smoothstep } from '../math/utils.js';
+import { RIDER_HEIGHT } from '../math/physics.js';
 import { surfaceY } from './TerrainRenderer.js';
+
+export const RIDER_FRAC_CRUISE = 0.065;
+export const RIDER_FRAC_FAST = 0.045;
+export const MIN_RIDER_PX = 26;
+export const LEAD_S = 0.9;
+const CRUISE_SPEED = 500; // px/s (≈ 21 m/s)
+const TOP_SPEED = 760; // px/s (≈ 31-32 m/s boosted)
 
 export class Camera {
   constructor() {
@@ -20,10 +41,13 @@ export class Camera {
     this.zoom = 1;
     this.scale = 1;
     this.baseScale = 1;
+    this.targetScale = 1;
     this.anchorX = 0;
+    this.anchorBase = 0;
+    this.prevRiderX = 0;
+    this.prevTy = 0;
     this.anchorY = 0;
     this.lookX = 0;
-    this.lookY = 0;
     this.shakeAmp = 0;
     this.shakeX = 0;
     this.shakeY = 0;
@@ -37,13 +61,39 @@ export class Camera {
     this.width = width;
     this.height = height;
     this.portrait = height > width * 1.05;
-    // Landscape: ~900 world px of height at zoom 1. Portrait: fit ~760 px of width.
-    this.baseScale = Math.min(height / 800, width / 700);
-    if (this.portrait) this.baseScale = Math.min(height / 860, width / 440);
+    // reference ("zoom 1") scale: the rider at cruising size; parallax layers key off it
+    this.baseScale = this.sizeScale(RIDER_FRAC_CRUISE);
+  }
+
+  /** Scale at which the rider is `frac` of the short side (floored at MIN_RIDER_PX). */
+  sizeScale(frac) {
+    const short = Math.min(this.width, this.height);
+    return Math.max(frac * short, MIN_RIDER_PX) / RIDER_HEIGHT;
   }
 
   addShake(amount) {
     this.shakeAmp = Math.min(14, Math.max(this.shakeAmp, amount));
+  }
+
+  /** Anchor fractions (where the camera target sits on screen) per mode. */
+  anchors(mode) {
+    if (mode === 'cinematic') return this.portrait ? [0.5, 0.5] : [0.6, 0.55];
+    if (mode === 'finish') return [0.5, 0.45];
+    return this.portrait ? [0.3, 0.52] : [0.32, 0.56];
+  }
+
+  /**
+   * Seconds of ground visible ahead of the rider for a given scale/speed
+   * (assuming the look-ahead has settled). Exposed for tests/reporting.
+   */
+  leadTime(scale, speed) {
+    const [ax] = this.anchors('race');
+    return (this.width * (1 - ax)) / scale / Math.max(1, speed);
+  }
+
+  /** Small dynamic look-ahead (world px); the anchor already places the rider left of centre. */
+  lookFor(vx) {
+    return clamp(vx * 0.1, -40, 90);
   }
 
   /**
@@ -54,55 +104,85 @@ export class Camera {
    * @param {boolean} cinematic
    */
   update(rider, course, dt, timeMs, cinematic) {
-    // cinematic (home / lobby): rider right of centre, clear of the UI panel and wordmark
-    const ax = cinematic ? (this.portrait ? 0.5 : 0.6) : this.portrait ? 0.27 : 0.32;
-    const ay = this.portrait ? 0.5 : 0.58;
-    this.anchorX = this.initialized ? damp(this.anchorX, this.width * ax, 2, dt) : this.width * ax;
-    this.anchorY = this.height * ay;
+    const mode = cinematic ? 'cinematic' : rider.mode === 'finished' ? 'finish' : 'race';
+    const [ax, ay] = this.anchors(mode);
+    const first = !this.initialized;
+    this.anchorBase = first ? this.width * ax : damp(this.anchorBase, this.width * ax, mode === 'race' ? 3 : 1.2, dt);
+    this.anchorX = this.anchorBase;
+    this.anchorY = first ? this.height * ay : damp(this.anchorY, this.height * ay, mode === 'race' ? 3 : 1.2, dt);
 
     const speed = Math.hypot(rider.vx, rider.vy);
-    const ground = course ? surfaceY(course, rider.x) : rider.y;
-    const air = clamp(ground - rider.y, 0, 2000);
+    const gAt = (x) => (course ? surfaceY(course, clamp(x, course.minX, course.maxX)) : rider.y);
+    const ground = gAt(rider.x);
+    const air = clamp(ground - rider.y, 0, 3000);
 
-    let zoomT;
+    let scaleT;
     let tx;
     let ty;
-    let followY = 7;
-    let followZ = 1.6;
-    if (cinematic) {
+    let followY = 5;
+    let followS = 1.6;
+    if (mode === 'cinematic') {
       const t = timeMs / 1000;
-      zoomT = 0.74 + 0.04 * Math.sin(t * 0.07);
+      scaleT = this.sizeScale(0.05) * (1 + 0.03 * Math.sin(t * 0.07));
       tx = rider.x + Math.sin(t * 0.05) * 40;
-      ty = (course ? surfaceY(course, tx) : rider.y) - 50 + Math.sin(t * 0.083) * 20;
+      ty = this.groundWindow(gAt, tx, 300) - 30 + Math.sin(t * 0.083) * 15;
       followY = 1.2;
-      followZ = 0.6;
+      followS = 0.6;
+    } else if (mode === 'finish') {
+      scaleT = this.sizeScale(0.06);
+      tx = rider.x;
+      ty = rider.y - 10;
+      followY = 1.5;
+      followS = 0.8;
     } else {
-      // Look ahead: a fraction of a second along the velocity, clamped.
-      const lx = clamp(rider.vx * 0.22, -60, 260);
-      const ly = clamp(rider.vy * 0.12, -80, 120);
-      this.lookX = damp(this.lookX, lx, 2.5, dt);
-      this.lookY = damp(this.lookY, ly, 2.0, dt);
-      zoomT = 1 - 0.2 * smoothstep(350, 1300, speed) - 0.24 * smoothstep(60, 650, air);
-      if (this.portrait) zoomT *= 0.9;
-      zoomT = clamp(zoomT, 0.62, 1);
+      const fast = smoothstep(CRUISE_SPEED, TOP_SPEED, speed);
+      const big = smoothstep(80, 600, air);
+      const frac = lerp(RIDER_FRAC_CRUISE, RIDER_FRAC_FAST, Math.max(fast, big));
+      scaleT = this.sizeScale(frac);
+      // lead time first: cap the scale so ≥ LEAD_S s of ground ahead is on screen
+      const look = this.lookFor(rider.vx);
+      // the rider sits at ax, so the ground ahead spans width * (1 - ax) on screen
+      scaleT = Math.min(scaleT, (this.width * (1 - ax)) / (LEAD_S * Math.max(speed, 1)));
+      this.lookX = first ? look : damp(this.lookX, look, 2.5, dt);
+      // the anchor is where the RIDER sits: shift the camera centre by the look-ahead, and
+      // move the anchor by the same screen amount so the rider stays at ax
       tx = rider.x + this.lookX;
-      // In the air keep the ground in view: aim between rider and ground.
-      ty = rider.y + this.lookY + air * 0.45;
+      this.anchorX += this.lookX * scaleT;
+      // vertical: frame the averaged ground around/ahead of the rider, lifted with air height
+      const ahead = (this.width * (1 - ax)) / scaleT;
+      const gw = this.groundWindow(gAt, rider.x + ahead * 0.25, Math.max(250, ahead * 0.6));
+      ty = lerp(gw, ground, 0.35) - air * 0.55 - 6;
+      // keep the rider inside a safe vertical band (HUD top / bottom)
+      const top = this.height * 0.26;
+      const bottom = this.height * 0.74;
+      const ry = (rider.y - ty) * scaleT + this.height * ay;
+      if (ry < top) ty -= (top - ry) / scaleT;
+      if (ry > bottom) ty += (ry - bottom) / scaleT;
     }
 
-    if (!this.initialized) {
+    if (first) {
       this.x = tx;
       this.y = ty;
-      this.zoom = zoomT;
+      this.targetScale = scaleT;
       this.initialized = true;
     } else {
-      // x tracks tightly (the rider is fast); big gaps (respawn) still ease.
+      // carry the camera with the rider's own displacement (no lag at speed), then
+      // ease the residual; a teleport (respawn) is not carried, so it eases instead of snapping
+      const moved = rider.x - this.prevRiderX;
+      if (Math.abs(moved) < 200) {
+        this.x += moved;
+        // y rides along with the (already smooth) framing target, not the rider: no bobbing
+        if (mode === 'race' && Math.abs(ty - this.prevTy) < 200) this.y += ty - this.prevTy;
+      }
       const gapX = Math.abs(tx - this.x);
-      this.x = damp(this.x, tx, cinematic ? 1.0 : gapX > 600 ? 4 : 12, dt);
+      this.x = damp(this.x, tx, mode !== 'race' ? 1.2 : gapX > 600 ? 4 : 12, dt);
       this.y = damp(this.y, ty, followY, dt);
-      this.zoom = damp(this.zoom, zoomT, followZ, dt);
+      this.targetScale = damp(this.targetScale, scaleT, followS, dt);
     }
-    this.scale = this.baseScale * this.zoom * this.debugZoom;
+    this.prevRiderX = rider.x;
+    this.prevTy = ty;
+    this.zoom = this.targetScale / this.baseScale;
+    this.scale = this.targetScale * this.debugZoom;
 
     // Shake: small deterministic wobble decaying quickly.
     this.shakeAmp = damp(this.shakeAmp, 0, 7, dt);
@@ -110,6 +190,13 @@ export class Camera {
     this.shakeX = this.shakeAmp * (Math.sin(s * 71.3) * 0.6 + Math.sin(s * 113.7) * 0.4);
     this.shakeY = this.shakeAmp * (Math.sin(s * 89.1 + 1.3) * 0.6 + Math.sin(s * 57.9) * 0.4);
     if (this.shakeAmp < 0.05) this.shakeX = this.shakeY = 0;
+  }
+
+  /** Mean surface height over [cx - half, cx + half] (7 samples): a spatial low-pass. */
+  groundWindow(gAt, cx, half) {
+    let sum = 0;
+    for (let i = -3; i <= 3; i++) sum += gAt(cx + (i / 3) * half);
+    return sum / 7;
   }
 
   sx(x) {
@@ -139,4 +226,3 @@ export class Camera {
     ctx.setTransform(s, 0, 0, s, (this.anchorX + this.shakeX - this.x * this.scale) * dpr, (this.anchorY + this.shakeY - this.y * this.scale) * dpr);
   }
 }
-

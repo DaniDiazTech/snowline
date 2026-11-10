@@ -26,7 +26,7 @@ export const JUMP_VY = 510;
  * Reference slope (dy/dx) at which an unboosted rider cruises at REF_SPEED.
  * The quadratic drag coefficient is derived from it, so steeper = faster.
  */
-export const REF_SLOPE = 0.21;
+export const REF_SLOPE = 0.165;
 
 /** Unboosted terminal speed on REF_SLOPE, px/s (≈21 m/s at PX_PER_M = 24). */
 export const REF_SPEED = 500;

@@ -85,7 +85,7 @@
   --hud-faint: rgba(246, 243, 236, 0.22);
   --hud-halo: 0 0 16px rgba(5, 10, 25, 0.55), 0 0 2px rgba(5, 10, 25, 0.6);
   --hud-accent: #ffc27a;
-  --hud-scrim: rgba(8, 12, 32, 0.5);
+  --hud-scrim: rgba(8, 12, 32, 0.2);
   color-scheme: dark;
 }
 
@@ -1736,7 +1736,7 @@ kbd {
   position: absolute;
   z-index: -1;
   inset: -70px -110px -50px -80px;
-  background: radial-gradient(closest-side, var(--hud-scrim), transparent);
+  background: radial-gradient(closest-side, var(--hud-scrim), var(--hud-scrim) 20%, transparent);
   pointer-events: none;
 }
 .hud__meter {

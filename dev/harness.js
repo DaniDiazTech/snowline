@@ -11,10 +11,10 @@
  *   x=<world x>   POSE mode: put the local rider at x (instead of simulating)
  *   mode=air|grind|ground|crashed|idle|finished   pose mode (with x)
  *   air=<px>      height above ground for mode=air (default 170)
- *   speed=<px/s>  pose speed (default 820)
+ *   speed=<px/s>  pose speed (default 500 = cruising)
  *   crouch= scarf= angle=     pose overrides (angle in degrees)
  *   boost=0..3 shield=1 hover=1
- *   event=land|crash|smash|pickup|boost|jump   fire one effect shortly before the frame
+ *   event=land|crash|smash|pickup|boost|jump|finish   fire one effect shortly before the frame
  *   ghosts=<n>    number of other riders (bots)
  *   freeze=1      render a deterministic warm-up, then stop (for screenshots)
  *   rate=<k>      live playback speed multiplier
@@ -139,7 +139,7 @@ async function main() {
   // ---- pose mode: synthetic RiderView at x ----
   const poseView = (x, i, timeMs) => {
     const mode = Q.get('mode') || 'ground';
-    const speed = num('speed', 820);
+    const speed = num('speed', 500);
     const off = i * -95;
     const px = x + off;
     const slope = course.slopeAt(px);
@@ -239,6 +239,7 @@ async function main() {
         case 'pickup': return { type: SimEvent.PICKUP, data: { featureId: -1, kind: 'coin', x: v.x + 10, y: v.y - 30 } };
         case 'boost': return { type: SimEvent.BOOST, data: { level: 2, duration: 3 } };
         case 'jump': return { type: SimEvent.JUMP, data: {} };
+        case 'finish': return { type: SimEvent.FINISH, data: { tick: 0, timeMs: 0 } };
         default: return null;
       }
     };
@@ -250,7 +251,7 @@ async function main() {
       const t0 = pose ? targetMs - warm : Math.max(0, targetMs - warm);
       if (pose) {
         const x = num('x', 0);
-        const speed = num('speed', 820);
+        const speed = num('speed', 500);
         const frames = Math.round((targetMs - t0) / dtMs);
         const evName = Q.get('event');
         for (let k = 0; k <= frames; k++) {

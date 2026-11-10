@@ -50,7 +50,9 @@ export class DecorRenderer {
     // colour: back objects fade towards the haze, front ones get darker
     const sil = back ? mix(P.sil, P.haze, 0.08 + back * 0.24) : front ? mix(P.sil, P.deep, 0.5 * front) : P.sil;
     const snow = back ? mix(P.snow, P.haze, 0.08 + back * 0.2) : front ? mix(P.snow, P.shade, 0.25 + front * 0.3) : P.snow;
-    const C = { sil: rgba(sil), silArr: sil, snow: rgba(snow), snowArr: snow, slope: Math.abs(course.slopeAt(d.x)) };
+    const C = { sil: rgba(sil), silArr: sil, snow: rgba(snow), snowArr: snow };
+    // how far below the anchor the ground drops across a footprint (crests, steep sides): foundations reach that deep
+    C.ext = (half) => Math.max(0, Math.max(course.heightAt(d.x - half), course.heightAt(d.x + half)) - (y - 3)) + 10;
     ctx.save();
     ctx.translate(d.x, y);
     switch (d.type) {
@@ -200,7 +202,7 @@ function hut(ctx, d, s, C, P, wx) {
   const over = 9 * s;
   ctx.fillStyle = C.sil;
   // walls, extended below the ground so a steep slope never shows the bottom
-  const ext = C.slope * w * 0.5 + 8;
+  const ext = C.ext(w * 0.5 + over);
   ctx.fillRect(-w / 2, -wall, w, wall + ext);
   // chimney
   ctx.fillRect(w * 0.18, -wall - roofH * 0.95, 9 * s, roofH * 0.7);
@@ -259,7 +261,7 @@ function windmill(ctx, d, s, C, P) {
   const h = 150 * s;
   ctx.fillStyle = C.sil;
   ctx.beginPath();
-  const ext = C.slope * 20 * s + 6;
+  const ext = C.ext(20 * s);
   ctx.moveTo(-20 * s, ext);
   ctx.lineTo(-9 * s, -h);
   ctx.lineTo(9 * s, -h);
@@ -379,7 +381,7 @@ function ruin(ctx, d, s, C) {
   const v = (d.variant | 0) % 3;
   ctx.fillStyle = C.sil;
   // foundation under the whole footprint (hidden by the snow)
-  ctx.fillRect(-46 * s, 0, 92 * s, C.slope * 46 * s + 8);
+  ctx.fillRect(-44 * s, 0, 88 * s, C.ext(44 * s));
   if (v === 0) {
     // broken arch
     ctx.beginPath();
@@ -528,4 +530,49 @@ function gate(ctx, s, C, P, finish, course, wx) {
   ctx.fillStyle = C.sil;
   ctx.fillRect(-1.5 * s, yL - h * s - 22 * s, 3 * s, 24 * s);
   ctx.fillRect(span - 1.5 * s, yR - h * s - 22 * s, 3 * s, 24 * s);
+  // post caps of snow
+  ctx.fillStyle = C.snow;
+  ctx.fillRect(-4 * s, yL - h * s - 1, 8 * s, 3 * s);
+  ctx.fillRect(span - 4 * s, yR - h * s - 1, 8 * s, 3 * s);
+  if (finish) {
+    // a festive garland sagging above the banner, flags fluttering
+    const ya = yL - h * s - 12 * s;
+    const yb = yR - h * s - 12 * s;
+    ctx.strokeStyle = C.sil;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i <= 16; i++) {
+      const u = i / 16;
+      const y = ya + (yb - ya) * u + Math.sin(u * Math.PI) * 18 * s;
+      if (i === 0) ctx.moveTo(u * span, y);
+      else ctx.lineTo(u * span, y);
+    }
+    ctx.stroke();
+    for (let i = 1; i < 12; i++) {
+      const u = i / 12;
+      const y = ya + (yb - ya) * u + Math.sin(u * Math.PI) * 18 * s;
+      const fl = Math.sin(P.t * 6 + i) * 2 * s;
+      ctx.fillStyle = rgba(P.festive[i % P.festive.length]);
+      ctx.beginPath();
+      ctx.moveTo(u * span - 5 * s, y);
+      ctx.lineTo(u * span + 5 * s, y);
+      ctx.lineTo(u * span + fl, y + 12 * s);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  // lanterns at the foot of each post, glowing at dusk / night
+  const lit = Math.max(0.3, P.lights);
+  for (const [x, y] of [
+    [-10 * s, yL],
+    [span + 10 * s, yR],
+  ]) {
+    ctx.fillStyle = C.sil;
+    ctx.fillRect(x - 1.2 * s, y - 30 * s, 2.4 * s, 32 * s);
+    ctx.fillStyle = rgba(mix(mix(C.silArr, P.haze, 0.3), P.accent, lit));
+    ctx.fillRect(x - 4 * s, y - 38 * s, 8 * s, 9 * s);
+    ctx.fillStyle = C.sil;
+    ctx.fillRect(x - 5 * s, y - 40 * s, 10 * s, 2.2 * s);
+    P.glow(wx + x, course.heightAt(wx) + y - 33 * s, 60 * s, 0.25 + 0.7 * P.lights);
+  }
 }

@@ -13,7 +13,7 @@
  */
 import { createRandom } from '../math/random.js';
 
-export const PK = Object.freeze({ PUFF: 0, SPARKLE: 1, SHARD: 2, SPARK: 3, RING: 4, EMBER: 5, FEATHER: 6 });
+export const PK = Object.freeze({ PUFF: 0, SPARKLE: 1, SHARD: 2, SPARK: 3, RING: 4, EMBER: 5, FEATHER: 6, CONFETTI: 7 });
 const MAX = 1400;
 const TAU = Math.PI * 2;
 
@@ -159,6 +159,14 @@ export class Particles {
         ctx.beginPath();
         ctx.arc(x, y, s * (1 - u) + 4, 0, TAU);
         ctx.stroke();
+      } else if (k === PK.CONFETTI) {
+        ctx.globalAlpha = Math.min(1, u * 3);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(this.rot[i]);
+        ctx.scale(Math.cos(this.rot[i] * 2.3), 1); // flutter: the paper flips
+        ctx.fillRect(-s / 2, -s * 0.3, s, s * 0.6);
+        ctx.restore();
       } else if (k === PK.FEATHER) {
         ctx.globalAlpha = Math.sin(u * Math.PI) * 0.9;
         ctx.save();
