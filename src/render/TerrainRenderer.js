@@ -28,8 +28,8 @@ export function surfaceY(course, x) {
   const fs = course.featuresIn(x, x);
   for (const f of fs) {
     if (f.type === FeatureType.CHASM && x > f.x0 && x < f.x1) {
-      const a = course.heightAt(f.x0 - 0.5);
-      const b = course.heightAt(f.x1 + 0.5);
+      const a = Number.isFinite(f.y0) ? f.y0 : course.heightAt(f.x0 - 0.5);
+      const b = Number.isFinite(f.y1) ? f.y1 : course.heightAt(f.x1 + 0.5);
       return a + ((b - a) * (x - f.x0)) / (f.x1 - f.x0);
     }
   }
@@ -210,8 +210,8 @@ export class TerrainRenderer {
       const xa = cam.sx(c.x0);
       const xb = cam.sx(c.x1);
       if (xb < -50 || xa > L.w + 50) continue;
-      const ya = cam.sy(course.heightAt(c.x0 - 0.5));
-      const yb = cam.sy(course.heightAt(c.x1 + 0.5));
+      const ya = cam.sy(Number.isFinite(c.y0) ? c.y0 : course.heightAt(c.x0 - 0.5));
+      const yb = cam.sy(Number.isFinite(c.y1) ? c.y1 : course.heightAt(c.x1 + 0.5));
       const k = cam.scale;
       const yTop = Math.min(ya, yb);
       // the gap itself

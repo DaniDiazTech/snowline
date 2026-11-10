@@ -9,7 +9,7 @@
 import { COUNTDOWN_MS, DEFAULT_SETTINGS, NET_SEND_HZ, PLAYER_COLORS, PX_PER_M, Phase, RiderMode, SimEvent, TICK_MS } from '../contracts.js';
 import { randomSeed } from '../math/random.js';
 import { Room } from '../net/Room.js';
-import { winnersStore } from '../store/WinnersStore.js';
+import { WinnersStore, winnersStore } from '../store/WinnersStore.js';
 import { Race } from './Race.js';
 
 const PROFILE_KEY = 'snowline.profile';
@@ -58,6 +58,8 @@ export class Game {
     this.params = params;
     this.netOpts = params.get('net') === 'local' ? { net: 'local' } : {};
     this.autopilot = params.has('auto') ? Number(params.get('auto')) || 0.8 : false;
+    // Test and offline sessions must never write to the real hall of fame.
+    this.store = this.netOpts.net || this.autopilot ? new WinnersStore({ key: 'snowline-hof-dev-4pXw' }) : winnersStore;
 
     this.profile = { name: '', colorIndex: Math.floor(Math.random() * PLAYER_COLORS.length), ...readJson(PROFILE_KEY, {}) };
     this.muted = !!readJson(MUTE_KEY, false);
@@ -145,7 +147,7 @@ export class Game {
 
   async openFame() {
     this.ui.setHallOfFame(null);
-    this.ui.setHallOfFame(await winnersStore.list(50));
+    this.ui.setHallOfFame(await this.store.list(50));
   }
 
   /* ---------------------------------- rooms ---------------------------------- */
@@ -425,7 +427,7 @@ export class Game {
     }
     // Only the host writes, so one race is stored exactly once.
     const room = this.room;
-    winnersStore
+    this.store
       .add({
         name: winner.name,
         colorIndex: winner.colorIndex,

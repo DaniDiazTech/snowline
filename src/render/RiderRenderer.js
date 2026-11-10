@@ -15,11 +15,14 @@
  */
 import { clamp, lerp } from '../math/utils.js';
 import { RiderMode } from '../contracts.js';
+import { RIDER_HEIGHT } from '../math/physics.js';
 import { hex, mix, rgba } from './color.js';
 
 const SEGMENTS = 16;
 const SUBSTEP = 1 / 120;
 const TAU = Math.PI * 2;
+/** The skeleton below is authored ~43.5 px board-to-head-top; scale it to the sim's rider height. */
+const K = RIDER_HEIGHT / 43.5;
 
 export class RiderRenderer {
   constructor() {
@@ -133,8 +136,8 @@ export class RiderRenderer {
     const ca = Math.cos(v.angle);
     const sa = Math.sin(v.angle);
     // neck in world space (scarf anchor)
-    const nx = v.x + J.n.x * ca - J.n.y * sa;
-    const ny = v.y + J.n.x * sa + J.n.y * ca;
+    const nx = v.x + (J.n.x * ca - J.n.y * sa) * K;
+    const ny = v.y + (J.n.x * sa + J.n.y * ca) * K;
 
     const boost = v.boostLevel || 0;
     const scarfCol = mix(mix(hex(v.color), P.sil, 0.12 + P.night * 0.2), [255, 255, 255], boost ? 0.12 + boost * 0.06 : 0);
@@ -164,6 +167,7 @@ export class RiderRenderer {
     ctx.save();
     ctx.translate(v.x, v.y);
     ctx.rotate(v.angle);
+    ctx.scale(K, K);
     // board
     ctx.fillStyle = body;
     ctx.beginPath();
@@ -217,7 +221,7 @@ export class RiderRenderer {
     ctx.fill();
     ctx.restore();
 
-    if (v.shield) this.drawShield(ctx, v, P);
+    if (v.shield) this.drawShield(ctx, v, P, ghost);
     if (v.hover) this.drawHover(ctx, v, P);
     s.seen = this.frame;
   }
@@ -225,7 +229,9 @@ export class RiderRenderer {
   scarf(v, ax, ay, dt, t) {
     let s = this.scarves.get(v.id);
     const amt = clamp(v.scarf ?? 0, 0, 1);
-    const L = lerp(2.0, 7.2, amt);
+    // in calm air (start line) the scarf is a shorter, lighter streamer
+    const calmL = Math.max(0, 1 - clamp(Math.hypot(v.vx, v.vy) / 900, 0, 1.4) * 2);
+    const L = lerp(2.0, 7.2, amt) * (1 - 0.4 * calmL);
     if (!s || Math.hypot(ax - s.ax, ay - s.ay) > 260) {
       s = s || { px: new Float32Array(SEGMENTS), py: new Float32Array(SEGMENTS), ox: new Float32Array(SEGMENTS), oy: new Float32Array(SEGMENTS), acc: 0, seen: 0, ax, ay };
       // lay it out trailing behind the velocity, pre-moving so it starts streaming
@@ -270,10 +276,23 @@ export class RiderRenderer {
         s.oy[i] = s.py[i];
         const tip = i / SEGMENTS;
         const rip = Math.sin(tt * (15 + boost * 3) - i * 0.62) * (900 + 1600 * speedK) * tip * (0.35 + speedK);
-        const ax2 = -fy * rip;
-        const ay2 = fx * rip + 520 * (1 - 0.5 * speedK);
+        // a light breeze when slow (start line): the scarf lifts and drifts back instead of hanging dead
+        const calm = Math.max(0, 1 - speedK * 2);
+        const breeze = calm * (420 + 180 * Math.sin(tt * 1.7 + i * 0.4)) * (0.4 + tip);
+        const ax2 = -fy * rip - breeze;
+        const ay2 = fx * rip + 520 * (1 - 0.5 * speedK) * (1 - 0.85 * calm) - calm * 160 * Math.sin(tt * 2.3 - i * 0.5);
         s.px[i] += vx + ax2 * SUBSTEP * SUBSTEP;
         s.py[i] += vy + ay2 * SUBSTEP * SUBSTEP;
+      }
+      // the scarf never sinks into the snow
+      if (this.groundAt) {
+        for (let i = 1; i < SEGMENTS; i++) {
+          const gy = this.groundAt(s.px[i]) - 1.5;
+          if (s.py[i] > gy) {
+            s.py[i] = gy;
+            s.oy[i] = gy;
+          }
+        }
       }
       for (let it = 0; it < 3; it++) {
         for (let i = 1; i < SEGMENTS; i++) {
@@ -333,7 +352,7 @@ export class RiderRenderer {
         ty /= d;
         const taper = 1 - 0.6 * (i / (n - 1));
         // travelling wave on top of the physics (purely visual, grows towards the tip)
-        const wave = Math.sin(this.t * (13 + boost * 3) - i * 0.85 + this.phase) * (0.6 + 2.6 * this.flow) * (i / (n - 1));
+        const wave = Math.sin(this.t * (13 + boost * 3) - i * 0.85 + this.phase) * (1.3 + 2.2 * this.flow) * (i / (n - 1));
         // the ribbon twists: width modulated along its length
         const w = W0 * taper * (0.75 + 0.25 * Math.cos(i * 0.7 + (v.x + v.y) * 0.004)) * (pass === 0 ? 0.5 : -0.5);
         const x = s.px[i] - ty * (w + wave);
@@ -357,35 +376,47 @@ export class RiderRenderer {
     ctx.fill();
   }
 
-  drawShield(ctx, v, P) {
+  drawShield(ctx, v, P, ghost) {
     const t = P.t;
-    const sp = Math.hypot(v.vx, v.vy) || 1;
     const dir = Math.atan2(v.vy, v.vx);
-    const cx = v.x + Math.sin(v.angle) * 18;
-    const cy = v.y - Math.cos(v.angle) * 18;
-    const R = 33 + Math.sin(t * 8) * 1.5;
-    const g = ctx.createRadialGradient(cx, cy, R * 0.55, cx, cy, R * 1.15);
+    const cx = v.x + Math.sin(v.angle) * 16;
+    const cy = v.y - Math.cos(v.angle) * 16;
+    const R = 27 + Math.sin(t * 6) * 0.8;
+    if (ghost) {
+      // other riders: one faint arc, no fill
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, dir - 0.7, dir + 0.7);
+      ctx.stroke();
+      return;
+    }
+    // local rider: a soft warm crescent of light + one crisp arc with a travelling glint
+    const g = ctx.createRadialGradient(cx, cy, R * 0.6, cx, cy, R * 1.12);
     g.addColorStop(0, 'rgba(255,255,255,0)');
-    g.addColorStop(0.8, `rgba(${P.accent[0] | 0},${P.accent[1] | 0},${P.accent[2] | 0},0.28)`);
+    g.addColorStop(0.85, `rgba(${P.accent[0] | 0},${P.accent[1] | 0},${P.accent[2] | 0},0.22)`);
     g.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(cx, cy, R * 1.15, dir - 1.25, dir + 1.25);
+    ctx.arc(cx, cy, R * 1.12, dir - 1.1, dir + 1.1);
     ctx.lineTo(cx, cy);
     ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-    ctx.lineWidth = 2;
     ctx.lineCap = 'round';
+    for (let k = 0; k < 3; k++) {
+      // tapered: three overlapping arcs, the central part brightest
+      const span = 0.95 - k * 0.3;
+      ctx.strokeStyle = `rgba(255,255,255,${0.22 + k * 0.18})`;
+      ctx.lineWidth = 1.1 + k * 0.35;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, dir - span, dir + span);
+      ctx.stroke();
+    }
+    const ga = dir - 0.8 + ((t * 1.6) % 1) * 1.6;
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.beginPath();
-    ctx.arc(cx, cy, R, dir - 0.9, dir + 0.9);
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, R + 5, dir - 0.6 + Math.sin(t * 3) * 0.1, dir + 0.6 + Math.sin(t * 3) * 0.1);
-    ctx.stroke();
-    void sp;
+    ctx.arc(cx + Math.cos(ga) * R, cy + Math.sin(ga) * R, 1.6, 0, TAU);
+    ctx.fill();
   }
 
   drawHover(ctx, v, P) {

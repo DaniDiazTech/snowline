@@ -247,7 +247,7 @@ async function main() {
     const renderFrozen = () => {
       const warm = 1500;
       const dtMs = 1000 / 60;
-      const t0 = Math.max(0, targetMs - warm);
+      const t0 = pose ? targetMs - warm : Math.max(0, targetMs - warm);
       if (pose) {
         const x = num('x', 0);
         const speed = num('speed', 820);

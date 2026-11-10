@@ -39,6 +39,7 @@ export class DecorRenderer {
     // The building under a roof grind is drawn by the grind itself (FeatureRenderer),
     // and bunting grinds draw their own poles: skip the matching decor.
     if (d.type === 'hut' && d.roofLift != null) return;
+    if (!Number.isFinite(d.x)) return;
     if (d.type === 'pole' && isBuntingEnd(course, d.x)) return;
     const depth = d.depth || 0;
     const back = depth > 0 ? Math.min(depth, 1.5) : 0;

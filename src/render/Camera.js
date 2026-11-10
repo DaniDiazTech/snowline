@@ -54,9 +54,10 @@ export class Camera {
    * @param {boolean} cinematic
    */
   update(rider, course, dt, timeMs, cinematic) {
-    const ax = this.portrait ? 0.27 : 0.32;
+    // cinematic (home / lobby): rider right of centre, clear of the UI panel and wordmark
+    const ax = cinematic ? (this.portrait ? 0.5 : 0.6) : this.portrait ? 0.27 : 0.32;
     const ay = this.portrait ? 0.5 : 0.58;
-    this.anchorX = this.width * ax;
+    this.anchorX = this.initialized ? damp(this.anchorX, this.width * ax, 2, dt) : this.width * ax;
     this.anchorY = this.height * ay;
 
     const speed = Math.hypot(rider.vx, rider.vy);
@@ -71,8 +72,8 @@ export class Camera {
     if (cinematic) {
       const t = timeMs / 1000;
       zoomT = 0.74 + 0.04 * Math.sin(t * 0.07);
-      tx = rider.x + 120 + Math.sin(t * 0.05) * 90;
-      ty = (course ? surfaceY(course, tx) : rider.y) - 120 + Math.sin(t * 0.083) * 30;
+      tx = rider.x + Math.sin(t * 0.05) * 40;
+      ty = (course ? surfaceY(course, tx) : rider.y) - 50 + Math.sin(t * 0.083) * 20;
       followY = 1.2;
       followZ = 0.6;
     } else {

@@ -19,6 +19,8 @@ export class FeatureRenderer {
 
   /** Features drawn before decor/riders (on the ground). */
   draw(ctx, f, P, course, consumed) {
+    if (!Number.isFinite(f.x) || (f.x0 != null && !(Number.isFinite(f.x0) && Number.isFinite(f.x1)))) return;
+    if (f.type === FeatureType.GRIND && !(Number.isFinite(f.y0) && Number.isFinite(f.y1))) return;
     switch (f.type) {
       case FeatureType.ROCK:
         if (!consumed.has(f.id)) this.rock(ctx, f, P, course);

@@ -446,9 +446,10 @@ export function generateCourse(seed, settings) {
           const [len, gapAfter] = p.spans[i];
           const x0 = x;
           const x1 = x + len;
+          let line;
           if (isRoof) {
             const lift = rngFeat.range(56, 70);
-            addGrind(GrindKind.ROOF, x0, x1, lift, lift, 0);
+            line = addGrind(GrindKind.ROOF, x0, x1, lift, lift, 0);
             decorFixed.push({ type: 'hut', x: (x0 + x1) / 2, scale: len / 200, depth: 0.15, variant: rngFeat.int(0, 3), roofLift: lift });
             if (rngFeat.chance(0.5)) decorFixed.push({ type: 'lantern', x: x1 + gapAfter * 0.5, scale: 1, depth: 0.3, variant: 1 });
           } else {
@@ -457,6 +458,7 @@ export function generateCourse(seed, settings) {
             let sag = rngFeat.range(14, 28);
             // Keep 52..100 px of clearance along the span.
             const g = addGrind(GrindKind.BUNTING, x0, x1, pole0, pole1, sag);
+            line = g;
             for (let tries = 0; tries < 8; tries++) {
               let minClear = Infinity;
               for (let k = 1; k < 16; k++) {
@@ -472,10 +474,7 @@ export function generateCourse(seed, settings) {
           }
           if (i === 0) {
             // Coins tracing the jump onto the first line, then along it.
-            for (let cx = x0 + 40; cx < x1 - 20; cx += 44) {
-              const g = features[features.length - 1];
-              addPickup(PickupKind.COIN, cx, grindLineY(g, cx) - BODY_CENTER - 4);
-            }
+            for (let cx = x0 + 40; cx < x1 - 20; cx += 44) addPickup(PickupKind.COIN, cx, grindLineY(line, cx) - BODY_CENTER - 4);
           }
           x = x1 + gapAfter;
         }

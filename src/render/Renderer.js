@@ -14,12 +14,13 @@
  * Uses the raw Canvas2D context (p.drawingContext) for speed; p5 is only the host.
  */
 import { clamp, smoothstep } from '../math/utils.js';
+import { BODY_CENTER } from '../math/physics.js';
 import { RiderMode, SimEvent } from '../contracts.js';
 import { sampleAtmosphere } from './DayCycle.js';
 import { Camera } from './Camera.js';
 import { Sky } from './Sky.js';
 import { Parallax } from './Parallax.js';
-import { TerrainRenderer } from './TerrainRenderer.js';
+import { TerrainRenderer, surfaceY } from './TerrainRenderer.js';
 import { DecorRenderer, FESTIVE } from './DecorRenderer.js';
 import { FeatureRenderer, isGroundIce } from './FeatureRenderer.js';
 import { RiderRenderer } from './RiderRenderer.js';
@@ -45,7 +46,9 @@ export class Renderer {
     this.particles = new Particles();
     this.weather = new Weather();
     this.effects = new Effects();
+    /** feature ids the LOCAL rider collected / smashed, tracked from PICKUP / ROCK_SMASH events (reset on setCourse) */
     this.consumed = new Set();
+    this.flyers = [];
     this.atmosphere = sampleAtmosphere(0, course);
     this.width = 0;
     this.height = 0;
@@ -67,7 +70,9 @@ export class Renderer {
     this.sky.setSeed(course?.seed ?? 1);
     this.parallax.setSeed(course?.seed ?? 1);
     this.consumed.clear();
+    this.flyers.length = 0;
     this.riders.reset();
+    this.riders.groundAt = course ? (x) => surfaceY(course, x) : null;
     this.particles.reset();
     this.camera.initialized = false;
     this.forceTint = true;
@@ -88,8 +93,31 @@ export class Renderer {
     return this.camera.worldToScreen(x, y);
   }
 
-  /** @param {import('../contracts.js').RenderFrame} frame */
+  /**
+   * Draws one frame. Never throws: a renderer bug must not freeze the game
+   * (the error is logged once per message and the canvas state is restored).
+   * @param {import('../contracts.js').RenderFrame} frame
+   */
   draw(frame) {
+    const ctx = this.p.drawingContext;
+    this._saved = false;
+    try {
+      this.drawFrame(frame);
+    } catch (e) {
+      if (this._saved) ctx.restore();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.shadowBlur = 0;
+      this._errors = this._errors || new Set();
+      if (!this._errors.has(e.message)) {
+        this._errors.add(e.message);
+        console.error('[Renderer] frame skipped:', e);
+      }
+    }
+  }
+
+  drawFrame(frame) {
     const t0 = performance.now();
     const { p, course, camera: cam } = this;
     if (!course) return;
@@ -124,6 +152,7 @@ export class Renderer {
     };
 
     ctx.save();
+    this._saved = true;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
@@ -200,6 +229,7 @@ export class Renderer {
     const others = frame.others || [];
     for (const v of others) this.riders.draw(ctx, v, P, dt);
     this.riders.draw(ctx, local, P, dt);
+    this.drawFlyers(ctx, local, dt);
     this.particles.draw(ctx, P.particleColors);
     this.drawGlows(ctx);
     this.glows.n = 0;
@@ -226,11 +256,12 @@ export class Renderer {
         if (sp.x < -40 || sp.x > w + 40 || sp.y < -40 || sp.y > h + 40) continue;
         const ty = sp.y - 64 * cam.scale;
         const near = Math.hypot(sp.x - lp.x, ty - (lp.y - 30 * cam.scale));
-        const a = 0.25 + 0.75 * smoothstep(30, 90, near);
+        const a = smoothstep(60, 110, near);
         this.riders.drawTag(ctx, v, sp.x, ty, a, P);
       }
     }
     ctx.restore();
+    this._saved = false;
     this.lastDrawMs = performance.now() - t0;
   }
 
@@ -270,7 +301,7 @@ export class Renderer {
 
   pushGlow(x, y, r, a, c) {
     const g = this.glows;
-    if (g.n >= MAX_GLOWS || a <= 0.01) return;
+    if (g.n >= MAX_GLOWS || !(a > 0.01) || !Number.isFinite(x) || !Number.isFinite(y) || !(r > 0)) return;
     g.x[g.n] = x;
     g.y[g.n] = y;
     g.r[g.n] = r;
@@ -317,14 +348,29 @@ export class Renderer {
           this.burst(x, y, 14, 160, 1);
           cam.addShake(6);
           break;
-        case SimEvent.ROCK_SMASH:
+        case SimEvent.ROCK_SMASH: {
           if (d.featureId != null) this.consumed.add(d.featureId);
+          const f = this.featureById(d.featureId, x);
+          if (f && f.type === 'campfire') {
+            // shield through a campfire: logs scatter, embers burst, a puff of smoke
+            for (let i = 0; i < 26; i++) ps.spawn(PK.EMBER, x + ps.rand(-10, 10), y - ps.rand(4, 20), local.vx * 0.3 + ps.rand(-160, 160), ps.rand(-320, -60), ps.rand(0.5, 1.2), ps.rand(1.6, 3), 3, 500, 1);
+            this.burst(x, y - 6, 14, 160, 1);
+            cam.addShake(2.5);
+            break;
+          }
           for (let i = 0; i < 16; i++) ps.spawn(PK.SHARD, x + ps.rand(-8, 8), y - ps.rand(5, 20), local.vx * 0.4 + ps.rand(-160, 220), ps.rand(-380, -80), ps.rand(0.6, 1.1), ps.rand(3, 7), 2, 1100, 0.6);
           this.burst(x, y - 8, 18, 200, 0);
           cam.addShake(3);
           break;
+        }
         case SimEvent.PICKUP:
           if (d.featureId != null) this.consumed.add(d.featureId);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) break;
+          // magnet: far coins fly to the rider and pop on arrival
+          if (d.kind === 'coin' && Math.hypot(x - local.x, y - (local.y - BODY_CENTER)) > 45) {
+            if (this.flyers.length < 40) this.flyers.push({ x, y, age: 0 });
+            break;
+          }
           ps.spawn(PK.RING, x, y, 0, 0, 0.45, 26, d.kind === 'coin' ? 5 : 4, 0, 0);
           for (let i = 0; i < (d.kind === 'coin' ? 5 : 12); i++) ps.spawn(PK.SPARKLE, x + ps.rand(-10, 10), y + ps.rand(-10, 10), ps.rand(-60, 60), ps.rand(-90, 20), ps.rand(0.35, 0.7), ps.rand(3, 6), d.kind === 'coin' ? 5 : 4, 0, 2);
           break;
@@ -349,6 +395,42 @@ export class Renderer {
         default:
           break;
       }
+    }
+  }
+
+  featureById(id, x) {
+    if (id == null || !Number.isFinite(x)) return null;
+    for (const f of this.course.featuresIn(x - 80, x + 80)) if (f.id === id) return f;
+    return null;
+  }
+
+  /** Coins pulled in by the magnet: ease towards the rider's body, then pop. */
+  drawFlyers(ctx, local, dt) {
+    const ps = this.particles;
+    const tx = local.x;
+    const ty = local.y - BODY_CENTER;
+    for (let i = this.flyers.length - 1; i >= 0; i--) {
+      const c = this.flyers[i];
+      c.age += dt;
+      const u = Math.min(1, c.age / 0.3);
+      const e = u * u * (3 - 2 * u);
+      const x = c.x + (tx - c.x) * e;
+      const y = c.y + (ty - c.y) * e - Math.sin(u * Math.PI) * 18;
+      if (u >= 1) {
+        ps.spawn(PK.RING, tx, ty, 0, 0, 0.4, 22, 5, 0, 0);
+        for (let k = 0; k < 4; k++) ps.spawn(PK.SPARKLE, tx + ps.rand(-8, 8), ty + ps.rand(-8, 8), ps.rand(-60, 60), ps.rand(-90, 10), ps.rand(0.3, 0.6), ps.rand(3, 5), 5, 0, 2);
+        this.flyers.splice(i, 1);
+        continue;
+      }
+      const r = 7 * (1 - 0.35 * u);
+      ctx.fillStyle = '#c98a1b';
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffd75a';
+      ctx.beginPath();
+      ctx.arc(x - 0.6, y, r - 1.6, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 

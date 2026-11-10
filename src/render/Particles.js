@@ -45,7 +45,7 @@ export class Particles {
   }
 
   spawn(kind, x, y, vx, vy, life, size, col = 0, grav = 0, drag = 1.5) {
-    if (this.alive >= MAX) return;
+    if (this.alive >= MAX || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(vx) || !Number.isFinite(vy)) return;
     const i = this.alive++;
     this.kind[i] = kind;
     this.x[i] = x;

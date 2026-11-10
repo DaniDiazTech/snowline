@@ -103,7 +103,12 @@ export class Race {
     this.goAtMs = goAtMs;
     this.course = generateCourse(seed, settings);
     this.local = new Runner(self.id, self.name, self.colorIndex, this.course, true);
-    if (autopilot) this.local.bot = new Bot(this.course, seed ^ 0x51ed, autopilot === true ? 0.8 : autopilot);
+    if (autopilot) {
+      // Seeded per rider so several autopilots in one room do not ride identically.
+      let h = seed ^ 0x51ed;
+      for (const ch of self.id) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+      this.local.bot = new Bot(this.course, h, autopilot === true ? 0.8 : autopilot);
+    }
     this.bots = [];
     for (let i = 0; i < clamp(settings.bots | 0, 0, 6); i++) {
       const runner = new Runner(`bot:${i}`, BOT_NAMES[i], BOT_COLORS[i], this.course, false);
