@@ -47,7 +47,6 @@ export class Camera {
     this.prevRiderX = 0;
     this.prevTy = 0;
     this.anchorY = 0;
-    this.lookX = 0;
     this.shakeAmp = 0;
     this.shakeX = 0;
     this.shakeY = 0;
@@ -73,7 +72,7 @@ export class Camera {
 
   /** Short zoom-out pulse (boost hit): rises instantly, eases out over ~0.25 s, adds a little lead. */
   kick(amount) {
-    this.kickAmt = Math.max(this.kickAmt || 0, amount);
+    this.kickTarget = Math.max(this.kickTarget || 0, amount);
   }
 
   addShake(amount) {
@@ -84,6 +83,7 @@ export class Camera {
   anchors(mode) {
     if (mode === 'cinematic') return this.portrait ? [0.5, 0.5] : [0.6, 0.55];
     if (mode === 'finish') return [0.5, 0.45];
+    if (mode === 'rescue') return [0.5, 0.5];
     return this.portrait ? [0.3, 0.52] : [0.32, 0.56];
   }
 
@@ -96,10 +96,6 @@ export class Camera {
     return (this.width * (1 - ax)) / scale / Math.max(1, speed);
   }
 
-  /** Small dynamic look-ahead (world px); the anchor already places the rider left of centre. */
-  lookFor(vx) {
-    return clamp(vx * 0.1, -40, 90);
-  }
 
   /**
    * @param {import('../contracts.js').RiderView} rider
@@ -109,90 +105,101 @@ export class Camera {
    * @param {boolean} cinematic
    */
   update(rider, course, dt, timeMs, cinematic) {
-    const mode = cinematic ? 'cinematic' : rider.mode === 'finished' ? 'finish' : 'race';
+    const rescue = rider.mode === 'rescue' && this.rescueSpan;
+    const mode = cinematic ? 'cinematic' : rider.mode === 'finished' ? 'finish' : rescue ? 'rescue' : 'race';
     const [ax, ay] = this.anchors(mode);
     const first = !this.initialized;
-    this.anchorBase = first ? this.width * ax : damp(this.anchorBase, this.width * ax, mode === 'race' ? 3 : 1.2, dt);
-    this.anchorX = this.anchorBase;
-    this.anchorY = first ? this.height * ay : damp(this.anchorY, this.height * ay, mode === 'race' ? 3 : 1.2, dt);
+    const W = this.width;
+    const H = this.height;
 
     const speed = Math.hypot(rider.vx, rider.vy);
     const gAt = (x) => (course ? surfaceY(course, clamp(x, course.minX, course.maxX)) : rider.y);
     const ground = gAt(rider.x);
     const air = clamp(ground - rider.y, 0, 3000);
+    // eased scale from the previous frame: framing maths uses it, never the raw target
+    const curScale = first ? this.sizeScale(RIDER_FRAC_CRUISE) : this.targetScale;
 
     let scaleT;
     let tx;
     let ty;
-    let followY = 5;
-    let followS = 1.6;
+    let wY = 5; // spring stiffness (rad/s) for y
+    let wS = 2.6; // ... for scale
     if (mode === 'cinematic') {
       const t = timeMs / 1000;
       scaleT = this.sizeScale(0.05) * (1 + 0.03 * Math.sin(t * 0.07));
       tx = rider.x + Math.sin(t * 0.05) * 40;
       ty = this.groundWindow(gAt, tx, 300) - 30 + Math.sin(t * 0.083) * 15;
-      followY = 1.2;
-      followS = 0.6;
+      wY = 1.6;
+      wS = 1;
     } else if (mode === 'finish') {
       scaleT = this.sizeScale(0.06);
       tx = rider.x;
       ty = rider.y - 10;
-      followY = 1.5;
-      followS = 0.8;
+      wY = 2;
+      wS = 1.2;
+    } else if (mode === 'rescue') {
+      // frame both lips of the pit while the balloon carries the rider across
+      const r = this.rescueSpan;
+      const span = Math.abs(r.x1 - r.x0) + 320;
+      scaleT = Math.min(this.sizeScale(RIDER_FRAC_CRUISE), (W * 0.75) / span);
+      tx = rider.x + ((r.x0 + r.x1) / 2 - rider.x) * 0.6;
+      ty = Math.min(r.y0, r.y1, rider.y) + Math.abs(r.y1 - r.y0) * 0.5 - 20;
+      wY = 2.5;
+      wS = 2;
     } else {
       const fast = smoothstep(CRUISE_SPEED, TOP_SPEED, speed);
       const big = smoothstep(80, 600, air);
       const frac = lerp(RIDER_FRAC_CRUISE, RIDER_FRAC_FAST, Math.max(fast, big));
       scaleT = this.sizeScale(frac);
-      // lead time first: cap the scale so ≥ LEAD_S s of ground ahead is on screen
-      const look = this.lookFor(rider.vx);
-      // the rider sits at ax, so the ground ahead spans width * (1 - ax) on screen
-      scaleT = Math.min(scaleT, (this.width * (1 - ax)) / (LEAD_S * Math.max(speed, 1)));
-      this.lookX = first ? look : damp(this.lookX, look, 2.5, dt);
-      // the anchor is where the RIDER sits: shift the camera centre by the look-ahead, and
-      // move the anchor by the same screen amount so the rider stays at ax
-      tx = rider.x + this.lookX;
-      this.anchorX += this.lookX * scaleT;
+      // lead time first: cap the scale so ≥ LEAD_S s of ground ahead is on screen (the rider sits at ax)
+      scaleT = Math.min(scaleT, (W * (1 - ax)) / (LEAD_S * Math.max(speed, 1)));
+      tx = rider.x;
       // vertical: frame the averaged ground around/ahead of the rider, lifted with air height
-      const ahead = (this.width * (1 - ax)) / scaleT;
+      const ahead = (W * (1 - ax)) / curScale;
       const gw = this.groundWindow(gAt, rider.x + ahead * 0.25, Math.max(250, ahead * 0.6));
       ty = lerp(gw, ground, 0.35) - air * 0.55 - 6;
       // keep the rider inside a safe vertical band (HUD top / bottom)
-      const top = this.height * 0.26;
-      const bottom = this.height * 0.74;
-      const ry = (rider.y - ty) * scaleT + this.height * ay;
-      if (ry < top) ty -= (top - ry) / scaleT;
-      if (ry > bottom) ty += (ry - bottom) / scaleT;
+      const top = H * 0.26;
+      const bottom = H * 0.74;
+      const ry = (rider.y - ty) * curScale + H * ay;
+      if (ry < top) ty -= (top - ry) / curScale;
+      if (ry > bottom) ty += (ry - bottom) / curScale;
     }
 
     if (first) {
       this.x = tx;
       this.y = ty;
       this.targetScale = scaleT;
+      this.vy = this.vs = this.va = this.vay = this.kv = 0;
+      this.anchorBase = W * ax;
+      this.anchorY = H * ay;
       this.initialized = true;
     } else {
-      // carry the camera with the rider's own displacement (no lag at speed), then
-      // ease the residual; a teleport (respawn) is not carried, so it eases instead of snapping
+      // x: carried with the rider's own displacement (no lag at speed), residual eased;
+      // a teleport (respawn) is not carried, so it eases instead of snapping
       const moved = rider.x - this.prevRiderX;
-      if (Math.abs(moved) < 200) {
-        this.x += moved;
-        // y rides along with the (already smooth) framing target, not the rider: no bobbing
-        if (mode === 'race' && Math.abs(ty - this.prevTy) < 200) this.y += ty - this.prevTy;
-      }
+      if (Math.abs(moved) < 200) this.x += moved;
       const gapX = Math.abs(tx - this.x);
-      this.x = damp(this.x, tx, mode !== 'race' ? 1.2 : gapX > 600 ? 4 : 12, dt);
-      this.y = damp(this.y, ty, followY, dt);
-      this.targetScale = damp(this.targetScale, scaleT, followS, dt);
+      this.x = damp(this.x, tx, mode === 'race' ? (gapX > 600 ? 4 : 12) : 1.5, dt);
+      // y: rides along with the (spatially smooth) framing target, residual on a critically damped spring
+      if (mode === 'race' && this.prevMode === 'race' && Math.abs(ty - this.prevTy) < 200) this.y += ty - this.prevTy;
+      [this.y, this.vy] = spring(this.y, this.vy, ty, wY, dt);
+      [this.targetScale, this.vs] = spring(this.targetScale, this.vs, scaleT, wS, dt);
+      [this.anchorBase, this.va] = spring(this.anchorBase, this.va, W * ax, 3.5, dt);
+      [this.anchorY, this.vay] = spring(this.anchorY, this.vay, H * ay, 3.5, dt);
     }
-    this.kickAmt = (this.kickAmt || 0) * Math.exp(-dt / 0.25);
-    if (this.kickAmt < 0.001) this.kickAmt = 0;
+    // boost pulse: a spring chasing a decaying target — eases in and out, never a step
+    this.kickTarget = (this.kickTarget || 0) * Math.exp(-dt / 0.25);
+    [this.kickAmt, this.kv] = spring(this.kickAmt || 0, this.kv || 0, this.kickTarget, 16, dt);
+    if (Math.abs(this.kickAmt) < 0.0003 && this.kickTarget < 0.0003) this.kickAmt = this.kickTarget = this.kv = 0;
     this.prevRiderX = rider.x;
     this.prevTy = ty;
+    this.prevMode = mode;
     this.zoom = this.targetScale / this.baseScale;
-    const kick = this.kickAmt || 0;
+    const kick = this.kickAmt;
     this.scale = this.targetScale * (1 - kick) * this.debugZoom;
     // the pulse also leans the frame forward a touch (rider drifts left)
-    this.anchorX -= kick * this.width * 0.6;
+    this.anchorX = this.anchorBase - kick * W * 0.6;
 
     // Shake: small deterministic wobble decaying quickly.
     this.shakeAmp = damp(this.shakeAmp, 0, 7, dt);
@@ -235,4 +242,18 @@ export class Camera {
     const s = this.scale * dpr;
     ctx.setTransform(s, 0, 0, s, (this.anchorX + this.shakeX - this.x * this.scale) * dpr, (this.anchorY + this.shakeY - this.y * this.scale) * dpr);
   }
+}
+
+/**
+ * One step of a critically damped spring (implicit Euler, unconditionally stable).
+ * Position and velocity are continuous, so a jumping target never produces a visible step.
+ * @returns {[number, number]} [position, velocity]
+ */
+function spring(x, v, target, omega, dt) {
+  const f = 1 + 2 * dt * omega;
+  const oo = omega * omega;
+  const hoo = dt * oo;
+  const hhoo = dt * hoo;
+  const det = 1 / (f + hhoo);
+  return [(f * x + dt * v + hhoo * target) * det, (v + hoo * (target - x)) * det];
 }

@@ -9,17 +9,20 @@ Create a room, share the code, and race your friends down the same mountain. Fir
 
 | Input | Action |
 | --- | --- |
-| Tap / click / `Space` | Jump |
-| Hold (in the air) | Backflip |
+| Tap / click / `Space` | Jump (a tap is a pure jump, never a flip) |
+| Hold (about 0.16 s or more) | Backflip |
 | `M` | Mute |
 
 It is a one-button game. Everything else is timing.
 
-- **Tricks make you faster.** Land a backflip, a grind or a combo and you get a speed boost. Bigger combos give a bigger, longer boost.
-- **Chain tricks** without touching plain snow (flip → grind → flip) to multiply the combo.
+- **Tricks make you faster.** Every landed trick (backflip, grind, combo) gives an instant kick plus a timed boost. Bigger combos give a bigger, longer boost.
+- **Chain tricks** without touching plain snow (flip, grind, flip) to multiply the combo.
 - **The scarf is your momentum.** It grows with every landed combo and raises your cruising speed. A crash resets it.
 - **While boosting you have a shield** for a moment: rocks and campfires are smashed instead of stopping you.
-- Jump the **chasms** and **rocks**. Grind the **bunting lines**, **rooftops** and **ice**. Grab coins, the feather (hover) and the magnet.
+- **Obstacles:** rocks, logs, snowmen, ice spikes and campfires. Jump them.
+- **Pits** always have a ramp: jump from it. If you fall in anyway, a balloon lifts you across to the far side for a 3-second penalty.
+- **Landings:** a clean landing keeps your combo. A slightly-off landing slides out and loses the combo instead of crashing; only a bad one crashes.
+- Grind the **bunting lines**, **rooftops** and **ice**. Grab coins, the feather (hover) and the magnet.
 - Nobody gets stuck: a crash only costs time.
 
 ## Playing with friends

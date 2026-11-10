@@ -35,6 +35,7 @@ export const RiderMode = Object.freeze({
   GRIND: 'grind',
   CRASHED: 'crashed', // tumbling / recovering, no control
   FINISHED: 'finished', // crossed the line, coasting to a stop
+  RESCUE: 'rescue', // fell into a pit: being lifted across to the far lip (x/y follow the lift path), no control
 });
 export const RIDER_MODES = Object.freeze(Object.values(RiderMode));
 
@@ -69,6 +70,7 @@ export const SimEvent = Object.freeze({
   PICKUP: 'pickup', // { featureId, kind, x, y }
   CRASH: 'crash', // { cause:'rock'|'landing'|'chasm'|'campfire'|'log'|'snowman'|'spikes', x, y }
   RESPAWN: 'respawn', // { x, y }
+  RESCUE_START: 'rescueStart', // { featureId, duration:number(s), toX, toY }  fell into a pit; the lift begins
   CHASM_CLEAR: 'chasmClear', // { featureId }
   FINISH: 'finish', // { tick:number, timeMs:number }
 });

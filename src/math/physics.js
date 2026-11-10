@@ -28,8 +28,8 @@ export const JUMP_VY = 600;
  */
 export const REF_SLOPE = 0.165;
 
-/** Unboosted terminal speed on REF_SLOPE, px/s (≈19 m/s at PX_PER_M = 24). */
-export const REF_SPEED = 460;
+/** Unboosted terminal speed on REF_SLOPE, px/s (≈18 m/s at PX_PER_M = 24). */
+export const REF_SPEED = 430;
 
 /** Quadratic drag coefficient (1/px): a_drag = DRAG_K · v². */
 export const DRAG_K = (GRAVITY * Math.sin(Math.atan(REF_SLOPE))) / (REF_SPEED * REF_SPEED);

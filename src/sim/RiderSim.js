@@ -3,7 +3,7 @@
  *
  * Physics model
  *  - GROUND: the rider is a point glued to the surface with a signed speed `s` along the
- *    tangent: a = g·sinθ − k·s² (+ boost push, + skate push below MIN_SPEED). Scarf and
+ *    tangent: a = g·sinθ − k·s² (+ boost push, + a 'get back to pace' push below RECOVER_BELOW × cruise). Scarf and
  *    boost divide the drag by M², which raises the cruising (terminal) speed by M.
  *    Each tick a short ballistic look-ahead decides whether the ground falls away faster
  *    than a free arc (crests, ramp lips, chasm edges) — then the rider becomes airborne.
@@ -13,7 +13,9 @@
  *    (counter-clockwise, angle decreases) with a quick ease-in; releasing damps the spin
  *    and levels the board only a little toward the slope below.
  *  - GRIND: like ground but on a grind line (bunting / roof / ice); mild speed gain.
- *  - CRASHED: tumble and slide to a stop, then respawn at low speed with invulnerability.
+ *  - CRASHED: tumble while still sliding along the slope (thrown over obstacles), then get up
+ *    in place already moving (≥ RESPAWN_MIN_FRAC × cruise) with brief invulnerability.
+ *  - RESCUE: fell into a pit — a 3 s lift carries the rider across to the far lip.
  *
  * The internal physics mode (`_p.phys`) is separate from the reported `state.mode`
  * (which adds IDLE / FINISHED / CRASHED precedence).
@@ -59,10 +61,13 @@ function freshPrivate() {
     bounceT: 0,
     crashT: 0,
     crashCause: '',
-    crashChasm: null,
-    respawnMinX: -Infinity,
     invulnT: 0,
     boostDur: 0,
+    boostEff: 0, // eased boost bonus actually applied (eases in ~0.15 s, out with the fade)
+    kickLeft: 0, // px/s of bank kick still to be delivered (spread over ~0.1 s)
+    landEaseT: 0, // s of fast board-to-slope easing left after a touchdown
+    wobbleT: 0, // s of sketchy-landing wobble left
+    rescue: null, // active pit rescue lift
     landSquash: 0,
     hoverOff: 0,
   };
@@ -155,6 +160,7 @@ export class RiderSim {
     p.bufferT = pressed ? SIM.JUMP_BUFFER : Math.max(0, p.bufferT - dt);
 
     this._timers();
+    this._applyKick();
     switch (p.phys) {
       case 'ground':
         this._ground(held, ev);
@@ -168,8 +174,11 @@ export class RiderSim {
       case 'crashed':
         this._crashed(ev);
         break;
+      case 'rescue':
+        this._rescue(ev);
+        break;
     }
-    if (p.phys !== 'crashed') this._pickups(ev);
+    if (p.phys !== 'crashed' && p.phys !== 'rescue') this._pickups(ev);
 
     const c = this.course;
     if (st.x > c.maxX - 5) {
@@ -189,28 +198,56 @@ export class RiderSim {
 
   /* ------------------------------------------------------------ helpers */
 
+  /** `target` shifted by whole turns to be nearest to the current (unwrapped) board angle. */
+  _nearest(target) {
+    return target + TAU * Math.round((this.state.angle - target) / TAU);
+  }
+
+  /** How far the contact point must sit above the snow so neither board tip digs in. */
+  _tipLift(rel) {
+    const r = Math.abs(wrapAngle(rel));
+    return SIM.BOARD_HALF * Math.sin(Math.min(r, Math.PI / 2));
+  }
+
   _surf(x) {
     return this.course.heightAt(x) - this._p.hoverOff;
   }
 
   _mult() {
-    const st = this.state;
-    let m = 1 + SIM.SCARF_SPEED_BONUS * st.scarf;
-    if (st.boostT > 0 && st.boostLevel > 0) m *= 1 + SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac();
+    const m = (1 + SIM.SCARF_SPEED_BONUS * this.state.scarf) * (1 + this._p.boostEff);
     return Math.min(m, SIM.MAX_SPEED_MULT);
   }
 
-  /** Extra push (px/s²) of the active boost: proportional to its tier bonus, fading with it. */
+  /** Extra push (px/s²) of the active boost: proportional to its eased bonus. */
   _boostPush() {
-    const st = this.state;
-    if (st.boostT <= 0 || st.boostLevel <= 0) return 0;
-    return SIM.BOOST_PUSH * SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac();
+    return SIM.BOOST_PUSH * this._p.boostEff;
   }
 
+  /** 1 while a boost is at full power, fading smoothly to 0 over its last part. */
   _boostFrac() {
     const st = this.state;
     if (st.boostT <= 0) return 0;
     return smoothstep(0, this._p.boostDur * (1 - SIM.BOOST_FULL_FRAC), st.boostT);
+  }
+
+  /** Delivers the pending bank kick over ~KICK_T instead of in one frame. */
+  _applyKick() {
+    const st = this.state;
+    const p = this._p;
+    if (p.kickLeft <= 0) return;
+    if (p.phys === 'crashed' || p.phys === 'rescue') {
+      p.kickLeft = 0;
+      return;
+    }
+    const dv = Math.min(p.kickLeft, SIM.KICK_RATE * dt);
+    p.kickLeft -= dv;
+    if (p.phys === 'air') {
+      const sp = Math.hypot(st.vx, st.vy);
+      if (sp > 1) {
+        st.vx *= (sp + dv) / sp;
+        st.vy *= (sp + dv) / sp;
+      }
+    } else p.s += dv;
   }
 
   _timers() {
@@ -226,7 +263,12 @@ export class RiderSim {
     p.invulnT = Math.max(0, p.invulnT - dt);
     p.grindCooldownT = Math.max(0, p.grindCooldownT - dt);
     p.bounceT = Math.max(0, p.bounceT - dt);
-    p.landSquash = Math.max(0, p.landSquash - 3 * dt);
+    p.landSquash = Math.max(0, p.landSquash - SIM.SQUASH_RECOVER * dt);
+    p.landEaseT = Math.max(0, p.landEaseT - dt);
+    p.wobbleT = Math.max(0, p.wobbleT - dt);
+    const boostTarget = st.boostT > 0 && st.boostLevel > 0 ? SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac() : 0;
+    p.boostEff = damp(p.boostEff, boostTarget, SIM.BOOST_EASE, dt);
+    if (p.boostEff < 1e-4) p.boostEff = 0;
     st.scarf = Math.max(0, st.scarf - SIM.SCARF_DECAY * dt);
     p.hoverOff = damp(p.hoverOff, st.hoverT > 0 ? SIM.HOVER_HEIGHT : 0, 6, dt);
     if (p.hoverOff < 0.01) p.hoverOff = 0;
@@ -272,16 +314,8 @@ export class RiderSim {
       this._p.boostDur = t;
       st.shield = true;
       ev.push({ type: SimEvent.BOOST, data: { level, duration: t } });
-      // Instant forward kick, felt right at the landing.
-      const kick = SIM.BOOST_TIERS[Math.max(level, 1) - 1].kick;
-      const p = this._p;
-      const sp = Math.hypot(st.vx, st.vy);
-      if (sp > 1) {
-        const f = (sp + kick) / sp;
-        st.vx *= f;
-        st.vy *= f;
-      }
-      if (p.phys === 'ground' || p.phys === 'grind') p.s += kick;
+      // Forward kick, delivered over the next ~0.1 s (felt at once, no single-frame snap).
+      this._p.kickLeft += SIM.BOOST_TIERS[Math.max(level, 1) - 1].kick;
     }
     cb.points = 0;
     cb.mult = 0;
@@ -384,12 +418,12 @@ export class RiderSim {
     let a = GRAVITY * Math.sin(th) - (DRAG_K / (M * M)) * p.s * Math.abs(p.s);
     if (st.boostT > 0 && p.s < M * Math.max(REF_SPEED * 0.8, terminalSpeed(Math.tan(th)))) a += this._boostPush();
     if (finished) a -= p.s > 0 ? SIM.FINISH_BRAKE : 0;
-    else if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
+    else a += this._recoverAccel();
     p.s += a * dt;
     p.s = finished ? Math.max(0, p.s) : clamp(p.s, 20, SIM.MAX_GROUND_SPEED);
     const vx = p.s * Math.cos(th);
     const vy = p.s * Math.sin(th);
-    if (p.s > 0 && this._fallsAway(st.x, st.y, vx, vy)) {
+    if (p.s > 0 && this._fallsAway(st.x, this._surf(st.x), vx, vy)) {
       st.vx = vx;
       st.vy = vy;
       this._startAir(false);
@@ -399,11 +433,15 @@ export class RiderSim {
     const px = st.x;
     const py = st.y;
     st.x += vx * dt;
-    st.y = this._surf(st.x);
     const th2 = Math.atan(c.slopeAt(st.x));
     st.vx = p.s * Math.cos(th2);
     st.vy = p.s * Math.sin(th2);
-    st.angle = damp(st.angle, th2, SIM.GROUND_ANGLE_SHARPNESS, dt);
+    // Board eases onto the slope (fast right after a touchdown); the contact point is lifted so
+    // neither tip digs into the snow while it is still tilted.
+    const target = this._nearest(th2);
+    st.angle = damp(st.angle, target, p.landEaseT > 0 ? SIM.LAND_ANGLE_SHARPNESS : SIM.GROUND_ANGLE_SHARPNESS, dt);
+    if (p.wobbleT > 0) st.angle += SIM.WOBBLE_AMP * Math.sin(p.wobbleT * 38) * (p.wobbleT / SIM.WOBBLE_T) * dt * 20;
+    st.y = this._surf(st.x) - this._tipLift(st.angle - th2);
     st.angVel = 0;
     if (!finished) {
       const ice = this._iceAt(st.x);
@@ -414,6 +452,13 @@ export class RiderSim {
       this._obstacles(px, py, ev, true);
       if (p.phys === 'ground') this._bank(ev);
     }
+  }
+
+  /** "Getting back up to pace": a push below RECOVER_BELOW × cruise, fading out as speed returns. */
+  _recoverAccel() {
+    const lim = SIM.RECOVER_BELOW * REF_SPEED;
+    const s = this._p.s;
+    return s < lim ? SIM.RECOVER_ACCEL * (1 - Math.max(0, s) / lim) : 0;
   }
 
   /* ------------------------------------------------------------ air */
@@ -484,13 +529,13 @@ export class RiderSim {
       this._addTrick(ev, 'bigAir', 'Big Air', TRICKS.BIG_AIR);
     }
 
-    // Chasms.
+    // Pits: dropping below the lips starts the rescue lift.
     const ch = c._chasmAt(st.x);
     if (ch) {
       p.overChasm = ch;
       const lip = ch.y0 + ((ch.y1 - ch.y0) * (st.x - ch.x0)) / (ch.x1 - ch.x0);
-      if (st.y > lip + SIM.CHASM_FALL_DEPTH) {
-        this._crash('chasm', ev, { chasm: ch });
+      if (st.y > lip + SIM.RESCUE_DEPTH && !finished) {
+        this._startRescue(ch, ev);
         return;
       }
     } else if (p.overChasm) {
@@ -499,10 +544,10 @@ export class RiderSim {
       if (st.x >= oc.x1) {
         const ground = this._surf(st.x);
         if (st.y > ground + SIM.CHASM_POP_TOL) {
-          // Slammed into the far wall.
+          // Too low at the far wall: the rider drops into the pit.
           st.x = oc.x1 - 2;
-          st.vx = 0;
-          this._crash('chasm', ev, { chasm: oc });
+          st.vx = Math.min(st.vx, 0);
+          this._startRescue(oc, ev);
           return;
         }
         if (st.y > ground) st.y = ground;
@@ -518,7 +563,12 @@ export class RiderSim {
       this._obstacles(px, py, ev, false);
       if (p.phys !== 'air') return;
     }
-    if (!ch && st.y >= this._surf(st.x)) this._land(ev);
+    // Touchdown when the lower board tip reaches the snow while coming down onto it (the tip rule
+    // is ignored just after take-off, when the tail is still leaving the lip).
+    const surfY = this._surf(st.x);
+    const vInto = -st.vx * Math.sin(under) + st.vy * Math.cos(under);
+    const tipDown = st.airTime > SIM.TIP_GRACE && vInto > 0 && st.y + this._tipLift(st.angle - under) >= surfY;
+    if (!ch && (st.y >= surfY || tipDown)) this._land(ev);
   }
 
   /**
@@ -540,6 +590,13 @@ export class RiderSim {
     return clamp(SIM.ASSIST_GAIN * (d - target), -cap, cap);
   }
 
+  /**
+   * Touchdown, graded by the board angle relative to the slope:
+   *   CLEAN   ≤ LAND_CLEAN_ANGLE   — keeps the tangential speed, banks the combo
+   *   SKETCHY ≤ LAND_SKETCHY_ANGLE — slides it out: combo lost, small speed loss, wobble
+   *   CRASH   beyond (or head-down) — tumbles, sliding along the slope
+   * The board then eases onto the slope over ~0.1 s; the contact point never goes below the snow.
+   */
   _land(ev) {
     const st = this.state;
     const p = this._p;
@@ -547,23 +604,33 @@ export class RiderSim {
     const finished = st.finishTick >= 0;
     const th = Math.atan(c.slopeAt(st.x));
     const rel = wrapAngle(st.angle - th);
+    const ar = Math.abs(rel);
     const vt = st.vx * Math.cos(th) + st.vy * Math.sin(th);
     const vn = -st.vx * Math.sin(th) + st.vy * Math.cos(th);
     const impact = clamp(vn / SIM.IMPACT_REF, 0, 1);
-    st.y = this._surf(st.x);
-    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= SIM.LAND_CLEAN_ANGLE;
-    if (!clean) {
-      ev.push({ type: SimEvent.LAND, data: { clean: false, impact } });
+    st.y = this._surf(st.x) - this._tipLift(rel);
+    const forgiving = finished || st.hoverT > 0;
+    const clean = forgiving || ar <= SIM.LAND_CLEAN_ANGLE;
+    const sketchy = !clean && ar <= SIM.LAND_SKETCHY_ANGLE;
+    if (!clean && !sketchy) {
+      ev.push({ type: SimEvent.LAND, data: { clean: false, sketchy: false, impact } });
       this._crash('landing', ev);
       return;
     }
     // A landing keeps the tangential component of the velocity and loses the normal one.
-    p.s = Math.max(SIM.MIN_LAND_SPEED, vt);
-    st.angle = th + (st.hoverT > 0 ? 0 : rel);
+    p.s = Math.max(SIM.MIN_LAND_SPEED, vt) * (sketchy ? 1 - SIM.SKETCHY_LOSS : 1);
+    if (st.hoverT > 0) st.angle = this._nearest(th);
     st.angVel = 0;
-    p.landSquash = Math.max(p.landSquash, impact + 0.2);
-    if (p.jumped || st.airTime >= SIM.MICRO_AIR || st.combo.tricks.length) {
-      ev.push({ type: SimEvent.LAND, data: { clean: true, impact } });
+    p.landEaseT = SIM.LAND_EASE_T;
+    p.landSquash = Math.max(p.landSquash, clamp(vn / SIM.SQUASH_REF, 0, 1));
+    if (sketchy) {
+      p.wobbleT = SIM.WOBBLE_T;
+      st.combo.points = 0; // the unbanked combo is lost
+      st.combo.mult = 0;
+      st.combo.tricks = [];
+      ev.push({ type: SimEvent.LAND, data: { clean: false, sketchy: true, impact } });
+    } else if (p.jumped || st.airTime >= SIM.MICRO_AIR || st.combo.tricks.length) {
+      ev.push({ type: SimEvent.LAND, data: { clean: true, sketchy: false, impact } });
     }
     st.airTime = 0;
     st.flips = 0;
@@ -602,7 +669,7 @@ export class RiderSim {
       st.vx = p.s * Math.cos(thL);
       st.vy = p.s * Math.sin(thL);
       st.y = ly;
-      st.angle = thL + rel * 0.5;
+      p.landEaseT = SIM.LAND_EASE_T; // board eases onto the line (no snap)
       p.overChasm = null;
       this._startGrind(ev, g);
       return true;
@@ -631,7 +698,7 @@ export class RiderSim {
     let a = GRAVITY * Math.sin(th) - ((DRAG_K * (ice ? SIM.ICE_DRAG_MULT : SIM.GRIND_DRAG_MULT)) / (M * M)) * p.s * p.s;
     if (p.s < SIM.GRIND_CAP * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
     if (st.boostT > 0 && p.s < M * REF_SPEED) a += this._boostPush();
-    if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
+    a += this._recoverAccel();
     p.s = clamp(p.s + a * dt, 40, SIM.MAX_GROUND_SPEED);
     const dx = p.s * Math.cos(th) * dt;
     const nx = st.x + dx;
@@ -665,7 +732,7 @@ export class RiderSim {
     const th2 = Math.atan(ice ? c.slopeAt(nx) : this._lineSlope(g, nx));
     st.vx = p.s * Math.cos(th2);
     st.vy = p.s * Math.sin(th2);
-    st.angle = damp(st.angle, th2, SIM.GROUND_ANGLE_SHARPNESS, dt);
+    st.angle = damp(st.angle, this._nearest(th2), p.landEaseT > 0 ? SIM.LAND_ANGLE_SHARPNESS : SIM.GROUND_ANGLE_SHARPNESS, dt);
     st.angVel = 0;
   }
 
@@ -721,38 +788,63 @@ export class RiderSim {
         this._addTrick(ev, kind.smash, kind.label, TRICKS.SMASH);
         continue;
       }
-      this._crash(f.type, ev, { obstacleEnd: f.x + (f.w ? f.w / 2 : f.size) });
+      this._crash(f.type, ev, { obstacle: f });
       return;
     }
   }
 
   /* ------------------------------------------------------------ crash */
 
+  /**
+   * Crash: the rider tumbles but keeps sliding (no dead stop). Hitting an obstacle throws the
+   * rider up and over it, so the tumble naturally ends beyond it.
+   */
   _crash(cause, ev, info = {}) {
     const st = this.state;
     const p = this._p;
+    const c = this.course;
     ev.push({ type: SimEvent.CRASH, data: { cause, x: st.x, y: st.y } });
     if (p.grind) this._endGrind(ev);
+    this._loseRun(true);
+    const th = Math.atan(c.slopeAt(st.x));
+    const vt = Math.max(0, st.vx * Math.cos(th) + st.vy * Math.sin(th));
+    p.phys = 'crashed';
+    p.crashCause = cause;
+    p.crashT = SIM.CRASH_T;
+    p.overChasm = null;
+    p.kickLeft = 0;
+    if (info.obstacle) {
+      // Thrown over the obstacle: keep most of the forward speed, pop up.
+      st.vx = Math.max(st.vx * SIM.CRASH_KEEP, SIM.CRASH_MIN_THROW * REF_SPEED);
+      st.vy = Math.min(st.vy, -SIM.CRASH_THROW_VY);
+      st.y = Math.min(st.y, this._surf(st.x));
+      p.s = 0;
+    } else {
+      p.s = vt * SIM.CRASH_KEEP;
+      if (st.y >= this._surf(st.x) - 1) {
+        st.y = this._surf(st.x);
+        st.vx = p.s * Math.cos(th);
+        st.vy = p.s * Math.sin(th);
+      }
+    }
+    st.angVel = st.angVel < -2 ? -SIM.CRASH_SPIN : SIM.CRASH_SPIN;
+  }
+
+  /** Loses the run state shared by crashes and rescues (combo, boost; crashes also reset the scarf). */
+  _loseRun(resetScarf) {
+    const st = this.state;
+    const p = this._p;
     st.stats.crashes++;
     st.combo.points = 0;
     st.combo.mult = 0;
     st.combo.tricks = [];
-    st.scarf = 0;
+    if (resetScarf) st.scarf = 0;
     st.boostT = 0;
     st.boostLevel = 0;
     st.shield = false;
+    p.boostEff = 0;
     st.flips = 0;
     st.airTime = 0;
-    if (!info.chasm && !this.course._chasmAt(st.x)) st.y = Math.min(st.y, this._surf(st.x));
-    p.phys = 'crashed';
-    p.crashCause = cause;
-    p.crashChasm = info.chasm || null;
-    p.crashT = cause === 'chasm' ? SIM.CHASM_RESPAWN_T : SIM.CRASH_T;
-    p.respawnMinX = info.obstacleEnd ?? -Infinity;
-    p.overChasm = null;
-    p.s = Math.max(0, st.vx) * 0.75;
-    st.angVel = st.angVel < -2 ? -SIM.CRASH_SPIN : SIM.CRASH_SPIN;
-    if (cause === 'rock' || cause === 'campfire') st.vx *= 0.6;
   }
 
   _crashed(ev) {
@@ -760,67 +852,59 @@ export class RiderSim {
     const p = this._p;
     const c = this.course;
     p.crashT -= dt;
-    st.angVel *= Math.exp(-SIM.CRASH_SPIN_DECAY * dt);
+    const th = Math.atan(c.slopeAt(st.x));
+    if (p.crashT < SIM.CRASH_GETUP_T) {
+      // Getting up: spin settles and the board comes back onto the slope.
+      st.angVel = damp(st.angVel, 0, 12, dt);
+      st.angle = damp(st.angle, this._nearest(th), 14, dt);
+    } else st.angVel *= Math.exp(-SIM.CRASH_SPIN_DECAY * dt);
     st.angle += st.angVel * dt;
-    if (p.crashChasm) {
-      const ch = p.crashChasm;
+    const ground = this._surf(st.x);
+    let airborne = st.y < ground - 0.5 || c._chasmAt(st.x);
+    if (airborne) {
+      st.vx -= ((DRAG_K * SIM.AIR_DRAG_MULT) * st.vx * Math.abs(st.vx)) * dt;
+      st.x += st.vx * dt;
+      st.y += st.vy * dt + 0.5 * GRAVITY * dt * dt;
       st.vy += GRAVITY * dt;
-      st.vx *= Math.exp(-3 * dt);
-      st.x = clamp(st.x + st.vx * dt, ch.x0 + 6, ch.x1 - 6);
-      st.y += st.vy * dt;
-      if (st.y >= ch.floorY) {
-        st.y = ch.floorY;
-        st.vy = 0;
-        st.vx = 0;
+      const ch = c._chasmAt(st.x);
+      if (ch) {
+        const lip = ch.y0 + ((ch.y1 - ch.y0) * (st.x - ch.x0)) / (ch.x1 - ch.x0);
+        if (st.y > lip + SIM.RESCUE_DEPTH) {
+          this._startRescue(ch, ev, true);
+          return;
+        }
+      } else if (st.y >= this._surf(st.x)) {
+        // Tumbling touchdown: keep sliding along the slope (tangential part of the velocity).
+        const t2 = Math.atan(c.slopeAt(st.x));
+        p.s = Math.max(0, st.vx * Math.cos(t2) + st.vy * Math.sin(t2));
+        st.y = this._surf(st.x);
+        st.vx = p.s * Math.cos(t2);
+        st.vy = p.s * Math.sin(t2);
+        airborne = false;
       }
     } else {
-      const ground = this._surf(st.x);
-      if (st.y < ground - 0.5) {
-        st.vy += GRAVITY * dt;
-        st.vx *= Math.exp(-0.8 * dt);
-        st.x += st.vx * dt;
-        st.y += st.vy * dt;
-        const ch = c._chasmAt(st.x);
-        if (ch) {
-          p.crashChasm = ch;
-          p.crashT = Math.max(p.crashT, 1.0);
-        } else if (st.y >= this._surf(st.x)) {
-          const th = Math.atan(c.slopeAt(st.x));
-          st.y = this._surf(st.x);
-          p.s = Math.max(0, st.vx * Math.cos(th) + st.vy * Math.sin(th)) * 0.6;
-        }
-      } else {
-        p.s *= Math.exp(-SIM.CRASH_FRICTION * dt);
-        const th = Math.atan(c.slopeAt(st.x));
-        st.vx = p.s * Math.cos(th);
-        st.vy = p.s * Math.sin(th);
-        st.x += st.vx * dt;
-        const ch = c._chasmAt(st.x);
-        if (ch) {
-          p.crashChasm = ch;
-          p.crashT = Math.max(p.crashT, 1.0);
-        } else {
-          st.y = this._surf(st.x);
-        }
-      }
+      // Sliding tumble: decelerate toward a getting-up pace along the slope (never a dead stop).
+      p.s = damp(p.s, SIM.CRASH_SLIDE_TO * REF_SPEED, SIM.CRASH_SLIDE_RATE, dt);
+      st.vx = p.s * Math.cos(th);
+      st.vy = p.s * Math.sin(th);
+      st.x += st.vx * dt;
+      if (c._chasmAt(st.x)) {
+        // Slid over a pit lip: fall (the air branch handles the rescue).
+        st.y += 1;
+      } else st.y = this._surf(st.x);
     }
-    if (p.crashT <= 0) this._respawn(ev);
+    if (p.crashT <= 0 && !airborne) this._respawn(ev);
   }
 
+  /** Back on the board where the tumble ended, already moving. */
   _respawn(ev) {
     const st = this.state;
     const p = this._p;
     const c = this.course;
     let x = st.x;
-    if (p.crashChasm) x = p.crashChasm.x1 + SIM.CHASM_RESPAWN_OFFSET;
-    if (p.respawnMinX > -Infinity) x = Math.max(x, p.respawnMinX + SIM.RESPAWN_CLEAR);
-    for (let iter = 0; iter < 8; iter++) {
+    // Only if the tumble ended inside an obstacle: step past it.
+    for (let iter = 0; iter < 6; iter++) {
       let moved = false;
-      const ch = c._chasmAt(x);
-      if (ch) {
-        x = ch.x1 + SIM.CHASM_RESPAWN_OFFSET;
-        moved = true;
-      }
       for (const f of c.featuresIn(x - 120, x + 120)) {
         const half = f.w ? f.w / 2 : f.size;
         if (SOLID[f.type] && !this.consumed.has(f.id) && Math.abs(f.x - x) < half + 4) {
@@ -833,18 +917,91 @@ export class RiderSim {
     x = Math.min(x, c.maxX - 20);
     const th = Math.atan(c.slopeAt(x));
     st.x = x;
+    st.angle = this._nearest(th);
     st.y = this._surf(x);
-    st.angle = th;
     st.angVel = 0;
-    p.s = SIM.RESPAWN_SPEED;
+    p.s = Math.max(p.s, SIM.RESPAWN_MIN_FRAC * REF_SPEED);
     st.vx = p.s * Math.cos(th);
     st.vy = p.s * Math.sin(th);
     p.phys = 'ground';
     p.invulnT = SIM.RESPAWN_INVULN;
-    p.crashChasm = null;
-    p.respawnMinX = -Infinity;
     p.bufferT = 0;
     ev.push({ type: SimEvent.RESPAWN, data: { x: st.x, y: st.y } });
+  }
+
+  /* ------------------------------------------------------------ pit rescue */
+
+  /**
+   * Fell into a pit: a 3 s lift carries the rider out and across (cubic Bézier: straight up out
+   * of the pit, an arc over it, set down on the far lip moving along the slope). Scarf survives;
+   * combo and boost are lost; counted in stats.crashes.
+   */
+  _startRescue(ch, ev, fromCrash = false) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    if (p.grind) this._endGrind(ev);
+    if (!fromCrash || p.phys !== 'crashed') this._loseRun(false);
+    p.kickLeft = 0;
+    p.overChasm = null;
+    const toX = ch.x1 + SIM.RESCUE_LAND_OFFSET;
+    const toY = c.heightAt(toX);
+    const top = Math.min(ch.y0, ch.y1) - SIM.RESCUE_ARC_H;
+    const thEnd = Math.atan(c.slopeAt(toX));
+    const lead = SIM.RESCUE_LEAD;
+    p.rescue = {
+      ch,
+      t: 0,
+      P0: { x: st.x, y: st.y },
+      // Rise out of the pit first (staying clear of the far wall), then arc across.
+      P1: { x: Math.min(st.x + 0.1 * (toX - st.x), ch.x1 - 30), y: top },
+      P2: { x: toX - lead * Math.cos(thEnd), y: Math.min(top + 40, toY - lead * Math.sin(thEnd) - SIM.RESCUE_SETDOWN_H) },
+      P3: { x: toX, y: toY },
+      a0: st.angle,
+      a1: this._nearest(thEnd),
+    };
+    // End speed along the path = release speed (continuous hand-off).
+    const r = p.rescue;
+    const tail = 3 * Math.hypot(r.P3.x - r.P2.x, r.P3.y - r.P2.y);
+    r.m = (SIM.RESCUE_RELEASE * REF_SPEED * SIM.RESCUE_T) / tail;
+    p.phys = 'rescue';
+    st.angVel = 0;
+    ev.push({ type: SimEvent.RESCUE_START, data: { featureId: ch.id, duration: SIM.RESCUE_T, toX, toY } });
+  }
+
+  _rescue(ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const r = p.rescue;
+    r.t += dt;
+    const u = Math.min(1, r.t / SIM.RESCUE_T);
+    // Time warp e(u): eases in from rest, leaves with slope m (matching the release speed).
+    const e = -2 * u * u * u + 3 * u * u + r.m * (u * u * u - u * u);
+    const de = (-6 * u * u + 6 * u + r.m * (3 * u * u - 2 * u)) / SIM.RESCUE_T;
+    const q = 1 - e;
+    const { P0, P1, P2, P3 } = r;
+    st.x = q * q * q * P0.x + 3 * q * q * e * P1.x + 3 * q * e * e * P2.x + e * e * e * P3.x;
+    st.y = q * q * q * P0.y + 3 * q * q * e * P1.y + 3 * q * e * e * P2.y + e * e * e * P3.y;
+    const dx = 3 * q * q * (P1.x - P0.x) + 6 * q * e * (P2.x - P1.x) + 3 * e * e * (P3.x - P2.x);
+    const dy = 3 * q * q * (P1.y - P0.y) + 6 * q * e * (P2.y - P1.y) + 3 * e * e * (P3.y - P2.y);
+    st.vx = dx * de;
+    st.vy = dy * de;
+    const settle = smoothstep(0, 0.6, u);
+    st.angle = r.a0 + (r.a1 - r.a0) * settle + SIM.RESCUE_SWAY * Math.sin(TAU * 1.1 * r.t) * Math.sin(Math.PI * u);
+    if (u >= 1) {
+      const th = Math.atan(c.slopeAt(st.x));
+      st.y = this._surf(st.x);
+      st.angle = r.a1;
+      p.s = SIM.RESCUE_RELEASE * REF_SPEED;
+      st.vx = p.s * Math.cos(th);
+      st.vy = p.s * Math.sin(th);
+      p.phys = 'ground';
+      p.invulnT = SIM.RESPAWN_INVULN;
+      p.bufferT = 0;
+      p.rescue = null;
+      ev.push({ type: SimEvent.RESPAWN, data: { x: st.x, y: st.y } });
+    }
   }
 
   /* ------------------------------------------------------------ pickups */
@@ -889,10 +1046,12 @@ export class RiderSim {
     let target = 0.2;
     if (p.phys === 'air') target = held ? 1 : 0.35;
     else if (p.phys === 'grind') target = 0.55;
-    else if (p.phys === 'crashed') target = 0;
-    else target = clamp(0.2 + 0.6 * p.landSquash, 0, 1);
-    st.crouch = damp(st.crouch, target, 14, dt);
-    if (p.phys === 'crashed') st.mode = RiderMode.CRASHED;
+    else if (p.phys === 'crashed' || p.phys === 'rescue') target = 0;
+    else target = clamp(0.2 + 0.7 * p.landSquash + (p.wobbleT > 0 ? 0.25 : 0), 0, 1);
+    // Squash dips fast on impact, recovers more slowly.
+    st.crouch = damp(st.crouch, target, target > st.crouch ? 30 : 10, dt);
+    if (p.phys === 'rescue') st.mode = RiderMode.RESCUE;
+    else if (p.phys === 'crashed') st.mode = RiderMode.CRASHED;
     else if (st.finishTick >= 0) st.mode = RiderMode.FINISHED;
     else st.mode = p.phys === 'air' ? RiderMode.AIR : p.phys === 'grind' ? RiderMode.GRIND : RiderMode.GROUND;
   }

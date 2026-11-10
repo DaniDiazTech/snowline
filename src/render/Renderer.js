@@ -49,6 +49,7 @@ export class Renderer {
     /** feature ids the LOCAL rider collected / smashed, tracked from PICKUP / ROCK_SMASH events (reset on setCourse) */
     this.consumed = new Set();
     this.flyers = [];
+    this.trail = { x: new Float32Array(64), y: new Float32Array(64), age: new Float32Array(64), n: 0 };
     this.atmosphere = sampleAtmosphere(0, course);
     this.width = 0;
     this.height = 0;
@@ -71,6 +72,8 @@ export class Renderer {
     this.parallax.setSeed(course?.seed ?? 1);
     this.consumed.clear();
     this.flyers.length = 0;
+    if (this.trail) this.trail.n = 0;
+    this.camera.rescueSpan = null;
     this.riders.reset();
     this.riders.groundAt = course ? (x) => surfaceY(course, x) : null;
     this.particles.reset();
@@ -131,6 +134,11 @@ export class Renderer {
     const atm = sampleAtmosphere(frame.timeMs, course);
     this.atmosphere = atm;
 
+    if (local.mode !== RiderMode.RESCUE) cam.rescueSpan = null;
+    else if (!cam.rescueSpan) {
+      const f = this.chasmNear(local.x);
+      if (f) cam.rescueSpan = this.spanOf(f);
+    }
     cam.update(local, course, dt, frame.timeMs, !!frame.cinematic);
     const P = this.palette(atm, t);
     this.handleEvents(frame.events || [], local, P);
@@ -218,6 +226,7 @@ export class Renderer {
     this.terrain.drawLip(ctx, atm, cam);
 
     cam.apply(ctx, dpr);
+    if (!frame.cinematic) this.drawTrail(ctx, local, dt, P);
     for (const f of feats) if (f.type !== 'pickup' && (f.type !== 'grind' || isGroundIce(f, course))) this.features.draw(ctx, f, P, course, this.consumed);
     this.drawGlows(ctx);
     this.glows.n = 0;
@@ -229,6 +238,7 @@ export class Renderer {
     const others = frame.others || [];
     for (const v of others) this.riders.draw(ctx, v, P, dt);
     this.riders.draw(ctx, local, P, dt);
+    this.riders.drawDeparting(ctx, P, dt);
     this.drawFlyers(ctx, local, dt);
     this.particles.draw(ctx, P.particleColors);
     this.drawGlows(ctx);
@@ -342,9 +352,18 @@ export class Renderer {
       switch (e.type) {
         case SimEvent.LAND: {
           const k = clamp(d.impact ?? 0.4, 0, 1);
-          this.burst(local.x, local.y, 8 + Math.round(26 * k), 80 + 220 * k, 0);
-          if (!d.clean) this.burst(local.x, local.y, 12, 200, 1);
-          if (k > 0.55) cam.addShake(1.5 + 4 * (k - 0.55));
+          const sketchy = !!d.sketchy || d.clean === false;
+          this.landingFx(local, k, sketchy);
+          this.riders.landed(local.id, k, sketchy);
+          if (k > 0.55) cam.addShake(1.2 + 3.5 * (k - 0.55) + (sketchy ? 1 : 0));
+          break;
+        }
+        case SimEvent.RESCUE_START: {
+          // puff at the pit edge, then the camera frames both lips
+          this.burst(local.x, local.y, 22, 180, 0);
+          this.particles.spawn(PK.RING, local.x, local.y - 10, 0, 0, 0.6, 46, 4, 0, 0);
+          const f = this.featureById(d.featureId, local.x) || this.chasmNear(local.x);
+          cam.rescueSpan = f ? this.spanOf(f) : null;
           break;
         }
         case SimEvent.CRASH:
@@ -460,6 +479,84 @@ export class Renderer {
     }
   }
 
+  /** Lips of a chasm feature for the camera. */
+  spanOf(f) {
+    const c = this.course;
+    return { x0: f.x0, x1: f.x1, y0: Number.isFinite(f.y0) ? f.y0 : c.heightAt(f.x0 - 1), y1: Number.isFinite(f.y1) ? f.y1 : c.heightAt(f.x1 + 1) };
+  }
+
+  chasmNear(x) {
+    for (const f of this.course.featuresIn(x - 600, x + 600)) if (f.type === 'chasm') return f;
+    return null;
+  }
+
+  /**
+   * Touchdown: a powder sheet thrown forward plus two spray arcs from the board tips,
+   * all scaled by the impact; a sketchy landing is bigger and messier.
+   */
+  landingFx(v, k, sketchy) {
+    const ps = this.particles;
+    const ca = Math.cos(v.angle);
+    const sa = Math.sin(v.angle);
+    const m = sketchy ? 1.6 : 1;
+    const n = Math.round((10 + 34 * k) * m);
+    for (let i = 0; i < n; i++) {
+      // forward sheet: low, fast, fanning along the slope
+      const f = ps.rand(0.35, 0.95);
+      ps.spawn(PK.PUFF, v.x + ca * ps.rand(-6, 14), v.y + sa * 6 - ps.rand(0, 4), v.vx * f + ps.rand(-40, 40) * m, v.vy * f - ps.rand(40, 170) * (0.4 + k) * m, ps.rand(0.35, 0.8), ps.rand(1.6, 4) * (0.8 + 0.5 * k), sketchy && i % 3 === 0 ? 1 : 0, 520, 3.4);
+    }
+    for (const side of [-1, 1]) {
+      // two arcs: from each tip, up and back
+      const tx = v.x + ca * 15 * side * 0.8;
+      const ty = v.y + sa * 15 * side * 0.8;
+      for (let i = 0; i < Math.round((6 + 14 * k) * m); i++) {
+        const u = i / (6 + 14 * k);
+        ps.spawn(PK.PUFF, tx, ty - 2, -v.vx * (0.05 + 0.2 * u) + side * ps.rand(10, 60) * m, -(120 + 220 * k) * (0.6 + 0.6 * u) * ps.rand(0.8, 1.1), ps.rand(0.4, 0.75), ps.rand(1.4, 3.2), 0, 700, 2.4);
+      }
+    }
+    this.trailBoost = 1;
+  }
+
+  /** Short groove carved behind the board on the ground (local rider), fading out. */
+  drawTrail(ctx, local, dt, P) {
+    const tr = this.trail;
+    for (let i = 0; i < tr.n; i++) tr.age[i] += dt;
+    if (local.mode === RiderMode.GROUND || local.mode === RiderMode.FINISHED) {
+      if (tr.n === 0 || Math.hypot(local.x - tr.x[tr.n - 1], local.y - tr.y[tr.n - 1]) > 6) {
+        if (tr.n === tr.x.length) {
+          tr.x.copyWithin(0, 1);
+          tr.y.copyWithin(0, 1);
+          tr.age.copyWithin(0, 1);
+          tr.n--;
+        }
+        tr.x[tr.n] = local.x;
+        tr.y[tr.n] = local.y;
+        tr.age[tr.n] = 0;
+        tr.n++;
+      }
+    }
+    while (tr.n > 0 && tr.age[0] > 0.9) {
+      tr.x.copyWithin(0, 1);
+      tr.y.copyWithin(0, 1);
+      tr.age.copyWithin(0, 1);
+      tr.n--;
+    }
+    if (tr.n < 2) return;
+    this.trailBoost = Math.max(0, (this.trailBoost || 0) - dt * 1.2);
+    const col = mix(P.shade, P.sil, 0.15);
+    ctx.lineCap = 'round';
+    for (let i = 1; i < tr.n; i++) {
+      const a = (1 - tr.age[i] / 0.9) * (0.28 + 0.4 * this.trailBoost);
+      if (a <= 0.01) continue;
+      ctx.strokeStyle = rgba(col, a);
+      ctx.lineWidth = 1.6 + 1.6 * this.trailBoost;
+      ctx.beginPath();
+      ctx.moveTo(tr.x[i - 1], tr.y[i - 1] + 0.8);
+      ctx.lineTo(tr.x[i], tr.y[i] + 0.8);
+      ctx.stroke();
+    }
+  }
+
   featureById(id, x) {
     if (id == null || !Number.isFinite(x)) return null;
     for (const f of this.course.featuresIn(x - 80, x + 80)) if (f.id === id) return f;
@@ -529,6 +626,14 @@ export class Renderer {
         while (em.spray >= 1) {
           em.spray -= 1;
           ps.spawn(PK.PUFF, tx + ps.rand(-3, 3), ty - ps.rand(0, 3), -v.vx * ps.rand(0.05, 0.25) + ps.rand(-30, 30), -ps.rand(40, 140) * clamp(sp / 700, 0.4, 1.5), ps.rand(0.3, 0.7), ps.rand(1.1, 2.8) * (0.8 + sp / 1600), 0, 240, 3.2);
+        }
+      }
+      if (v.mode === RiderMode.CRASHED && sp > 40) {
+        // sliding tumble: a continuous plume of snow thrown up behind the body
+        em.spray += clamp(sp / 600, 0.3, 1.6) * (local ? 70 : 20) * dt;
+        while (em.spray >= 1) {
+          em.spray -= 1;
+          ps.spawn(PK.PUFF, v.x + ps.rand(-10, 6), v.y - ps.rand(0, 10), -v.vx * ps.rand(0.05, 0.3) + ps.rand(-40, 40), -ps.rand(60, 200), ps.rand(0.4, 0.9), ps.rand(2, 5), ps.rng.next() < 0.3 ? 1 : 0, 300, 2.6);
         }
       }
       if (v.mode === RiderMode.GRIND && sp > 40) {

@@ -27,6 +27,10 @@ const K = RIDER_HEIGHT / 43.5;
 export class RiderRenderer {
   constructor() {
     this.scarves = new Map();
+    /** per rider id: smoothed visual state (drawn angle, blended joints, landing/wobble timers, rescue) */
+    this.vis = new Map();
+    /** balloons released after a rescue, drifting away */
+    this.departing = [];
     this.frame = 0;
     // scratch joint storage (no per-frame allocation)
     this.J = {};
@@ -35,7 +39,18 @@ export class RiderRenderer {
 
   reset() {
     this.scarves.clear();
+    this.vis.clear();
+    this.departing.length = 0;
     this.flares = new Map();
+  }
+
+  /** Landing feedback hook (local rider's LAND event): squash + lean-back, wobble when sketchy. */
+  landed(id, impact, sketchy) {
+    const vs = this.vis.get(id);
+    if (!vs) return;
+    vs.landAge = 0;
+    vs.landK = clamp(impact, 0.15, 1);
+    if (sketchy) vs.wobbleAge = 0;
   }
 
   /** Boost hit: the scarf flares long and bright for a moment. */
@@ -59,12 +74,14 @@ export class RiderRenderer {
   sweep() {
     this.frame++;
     for (const [id, s] of this.scarves) if (this.frame - s.seen > 30) this.scarves.delete(id);
+    for (const [id, s] of this.vis) if (this.frame - s.seen > 30) this.vis.delete(id);
   }
 
-  /** Computes joints (board-local) into this.J. */
-  pose(v, t) {
+  /** Computes the TARGET joints (board-local) for the current mode into this.J. */
+  pose(v, t, vs) {
     const J = this.J;
     const mode = v.mode;
+    const rescue = mode === RiderMode.RESCUE;
     const crashed = mode === RiderMode.CRASHED;
     const air = mode === RiderMode.AIR;
     const grind = mode === RiderMode.GRIND;
@@ -73,6 +90,14 @@ export class RiderRenderer {
     let c = clamp(v.crouch || 0, 0, 1);
     if (grind) c = Math.max(c, 0.3);
     if (idle) c = 0.05;
+    if (crashed) c = Math.max(c, 0.7); // tucked roll
+    if (rescue) c = 0.12;
+    // landing: knees absorb (fast compress, slower recovery) and the body leans back a touch
+    const la = vs ? vs.landAge : 9;
+    const squash = la < 0.6 ? vs.landK * (la < 0.07 ? la / 0.07 : Math.exp(-(la - 0.07) / 0.13)) : 0;
+    c = clamp(c + squash * 0.55, 0, 1);
+    const wa = vs ? vs.wobbleAge : 9;
+    const wobble = wa < 0.45 ? 1 - wa / 0.45 : 0;
     const bob = mode === RiderMode.GROUND ? Math.sin(t * 6.5) * 0.4 : 0;
 
     set(J.f1, -7.5, -3);
@@ -81,9 +106,10 @@ export class RiderRenderer {
     const kneeOut = 2.5 + 3 * c;
     set(J.k1, (J.f1.x + J.h.x) / 2 + kneeOut * 0.6, (J.f1.y + J.h.y) / 2 + 0.5);
     set(J.k2, (J.f2.x + J.h.x) / 2 + kneeOut, (J.f2.y + J.h.y) / 2 - 0.5);
-    let lean = 0.14 + 0.62 * c + (air ? 0.06 : 0);
-    if (crashed) lean = 0.4 + Math.sin(t * 9) * 0.5;
-    if (finished) lean = 0.02;
+    let lean = 0.14 + 0.62 * c + (air ? 0.06 : 0) - squash * 0.5;
+    if (crashed) lean = 0.9 + Math.sin(t * 9) * 0.25;
+    if (finished || rescue) lean = 0.02;
+    lean += Math.sin(wa * 30) * 0.28 * wobble;
     const tl = 12.5 - 2 * c;
     set(J.n, J.h.x + Math.sin(lean) * tl, J.h.y - Math.cos(lean) * tl);
     set(J.hd, J.n.x + Math.sin(lean) * 5.2 + 0.6, J.n.y - Math.cos(lean) * 5.2);
@@ -93,11 +119,25 @@ export class RiderRenderer {
     let a1y;
     let a2x;
     let a2y;
-    if (crashed) {
-      a1x = Math.cos(t * 11) * 11;
-      a1y = Math.sin(t * 11) * 11;
-      a2x = Math.cos(t * 13 + 2) * 11;
-      a2y = Math.sin(t * 13 + 2) * 11;
+    if (rescue) {
+      // both hands up on the rope
+      a1x = -1.5;
+      a1y = -15;
+      a2x = 2;
+      a2y = -16;
+    } else if (wobble > 0) {
+      // sketchy landing: arms windmill to catch the balance
+      const ang = wa * 24;
+      a1x = Math.cos(ang) * 12;
+      a1y = Math.sin(ang) * 10 - 2;
+      a2x = Math.cos(ang + Math.PI) * 12;
+      a2y = Math.sin(ang + Math.PI) * 10 - 2;
+    } else if (crashed) {
+      // tumbling: arms flailing close to the body
+      a1x = Math.cos(t * 11) * 8;
+      a1y = Math.sin(t * 11) * 8;
+      a2x = Math.cos(t * 13 + 2) * 8;
+      a2y = Math.sin(t * 13 + 2) * 8;
     } else if (air) {
       const flap = Math.sin(t * 5) * 1.5;
       a1x = -12;
@@ -145,17 +185,104 @@ export class RiderRenderer {
    * @param {Object} P palette
    * @param {number} dt seconds since the previous frame
    */
+  /** Smoothed visual state of a rider (created on first sight). */
+  visOf(v) {
+    let vs = this.vis.get(v.id);
+    if (!vs) {
+      vs = { a: v.angle, prevTarget: v.angle, j: null, lift: 0, landAge: 9, landK: 0, wobbleAge: 9, prevMode: v.mode, prevVy: v.vy, rescueAge: 9, seen: 0 };
+      this.vis.set(v.id, vs);
+    }
+    return vs;
+  }
+
   draw(ctx, v, P, dt) {
     if (!Number.isFinite(v.x) || !Number.isFinite(v.y)) return;
     const t = P.t;
-    const J = this.pose(v, t);
+    const vs = this.visOf(v);
+    vs.seen = this.frame;
+    const mode = v.mode;
+    // timers + transitions
+    vs.landAge += dt;
+    vs.wobbleAge += dt;
+    if ((vs.prevMode === RiderMode.AIR) && (mode === RiderMode.GROUND || mode === RiderMode.FINISHED) && vs.landAge > 0.25) {
+      // touchdown seen without an event (ghosts): squash by how hard it came down
+      vs.landAge = 0;
+      vs.landK = clamp((vs.prevVy - 250) / 900, 0.2, 0.9);
+    }
+    if (mode === RiderMode.RESCUE) {
+      if (vs.prevMode !== RiderMode.RESCUE) vs.rescueAge = 0;
+      else vs.rescueAge += dt;
+    } else if (vs.prevMode === RiderMode.RESCUE) {
+      // set down: the balloon lets go and drifts away
+      if (this.departing.length < 16) this.departing.push({ x: v.x, y: v.y - 46 * K - 70, color: v.color, age: 0, ghost: !v.isLocal });
+    }
+
+    // target joints, then cross-fade (≈150 ms) from what was drawn last frame
+    const J = this.pose(v, t, vs);
+    const keys = JOINTS;
+    if (!vs.j) {
+      vs.j = new Float32Array(keys.length * 2);
+      for (let i = 0; i < keys.length; i++) {
+        vs.j[i * 2] = J[keys[i]].x;
+        vs.j[i * 2 + 1] = J[keys[i]].y;
+      }
+    } else {
+      const k = this.noSmooth ? 1 : 1 - Math.exp(-dt * 20);
+      for (let i = 0; i < keys.length; i++) {
+        const p = J[keys[i]];
+        vs.j[i * 2] += (p.x - vs.j[i * 2]) * k;
+        vs.j[i * 2 + 1] += (p.y - vs.j[i * 2 + 1]) * k;
+        p.x = vs.j[i * 2];
+        p.y = vs.j[i * 2 + 1];
+      }
+    }
+
+    // drawn angle: follow steady rotation without lag (predict by the target's own change),
+    // and ease away any jump (snap to the slope at touchdown, mode changes) over ~70 ms
+    let target = v.angle;
+    if (mode === RiderMode.RESCUE) target = 0.22 + Math.sin(t * 1.7 + 0.5) * 0.12;
+    let dTarget = wrapAngle(target - vs.prevTarget);
+    if (Math.abs(dTarget) > 0.6) dTarget = 0; // a jump, not a spin: let the easing handle it
+    vs.a += dTarget;
+    vs.a += wrapAngle(target - vs.a) * (this.noSmooth ? 1 : 1 - Math.exp(-dt * 15));
+    vs.prevTarget = target;
+    const ang = vs.a;
+    const ca = Math.cos(ang);
+    const sa = Math.sin(ang);
+
+    // ground contact: lift the drawn rider so the lowest board tip (or, tumbling, any limb)
+    // rests on the snow line instead of cutting into it. Rises instantly, settles smoothly.
+    let need = 0;
+    if (this.groundAt && mode !== RiderMode.RESCUE && mode !== RiderMode.GRIND) {
+      const pts = mode === RiderMode.CRASHED ? CONTACT_CRASH : CONTACT_BOARD;
+      for (let i = 0; i < pts.length; i += 3) {
+        let lx = pts[i];
+        let ly = pts[i + 1];
+        if (pts[i] === 999) {
+          const p = J[CONTACT_JOINTS[pts[i + 1]]];
+          lx = p.x;
+          ly = p.y;
+        }
+        const wx = v.x + (lx * ca - ly * sa) * K;
+        const wy = v.y + (lx * sa + ly * ca) * K + pts[i + 2] * K;
+        const pen = wy - (this.groundAt(wx) + 0.5);
+        if (pen > need) need = pen;
+      }
+      need = Math.min(need, 40);
+    }
+    vs.lift = this.noSmooth ? 0 : need >= vs.lift ? need : vs.lift + (need - vs.lift) * (1 - Math.exp(-dt * 14));
+    const X = v.x;
+    const Y = v.y - vs.lift;
+    vs.prevMode = mode;
+    vs.prevVy = v.vy;
+
+    if (mode === RiderMode.RESCUE) this.drawBalloon(ctx, v, vs, X, Y, J, ca, sa, P);
+
     const ghost = !v.isLocal;
     const body = ghost ? rgba(mix(P.sil, P.haze, 0.38)) : rgba(P.sil);
-    const ca = Math.cos(v.angle);
-    const sa = Math.sin(v.angle);
     // neck in world space (scarf anchor)
-    const nx = v.x + (J.n.x * ca - J.n.y * sa) * K;
-    const ny = v.y + (J.n.x * sa + J.n.y * ca) * K;
+    const nx = X + (J.n.x * ca - J.n.y * sa) * K;
+    const ny = Y + (J.n.x * sa + J.n.y * ca) * K;
 
     const boost = v.boostLevel || 0;
     const flare = this.flareOf(v.id, dt);
@@ -168,8 +295,8 @@ export class RiderRenderer {
 
     // at night a faint cool halo keeps the dark silhouette readable against dark ridges
     if (P.night > 0.3) {
-      const hx = v.x + Math.sin(v.angle) * 18;
-      const hy = v.y - Math.cos(v.angle) * 18;
+      const hx = X + sa * 18;
+      const hy = Y - ca * 18;
       const R = 46;
       const g = ctx.createRadialGradient(hx, hy, 4, hx, hy, R);
       const a = (P.night - 0.3) * (ghost ? 0.18 : 0.32);
@@ -179,14 +306,14 @@ export class RiderRenderer {
       ctx.fillRect(hx - R, hy - R, R * 2, R * 2);
     }
     // boost aura behind the rider
-    if (boost && !ghost) P.glow(v.x - v.vx * 0.02, v.y - 22, 46 + boost * 10, 0.22 + boost * 0.1, hex(v.color));
+    if (boost && !ghost) P.glow(X - v.vx * 0.02, Y - 22, 46 + boost * 10, 0.22 + boost * 0.1, hex(v.color));
 
     // scarf goes behind the body
     this.drawScarf(ctx, s, scarfCol, ghost ? 0.75 : 1, boost + flare * 4, v);
 
     ctx.save();
-    ctx.translate(v.x, v.y);
-    ctx.rotate(v.angle);
+    ctx.translate(X, Y);
+    ctx.rotate(ang);
     ctx.scale(K, K);
     // board
     ctx.fillStyle = body;
@@ -241,6 +368,7 @@ export class RiderRenderer {
     ctx.fill();
     ctx.restore();
 
+    this.drawn = { x: X, y: Y, angle: ang, hx: X + (J.hd.x * ca - J.hd.y * sa) * K, hy: Y + (J.hd.x * sa + J.hd.y * ca) * K, pen: need };
     if (v.shield) this.drawShield(ctx, v, P, ghost);
     if (v.hover) this.drawHover(ctx, v, P);
     s.seen = this.frame;
@@ -470,6 +598,47 @@ export class RiderRenderer {
     }
   }
 
+  /**
+   * Pit rescue: a little hot-air balloon in the rider's colour comes down on a rope;
+   * the rider hangs from it (hands on the rope, board dangling), swaying gently.
+   */
+  drawBalloon(ctx, v, vs, X, Y, J, ca, sa, P) {
+    const t = P.t;
+    // hands (mid point of both) in world space
+    const hx = X + (((J.a1.x + J.a2.x) / 2) * ca - ((J.a1.y + J.a2.y) / 2) * sa) * K;
+    const hy = Y + (((J.a1.x + J.a2.x) / 2) * sa + ((J.a1.y + J.a2.y) / 2) * ca) * K;
+    const e = Math.min(1, vs.rescueAge / 0.7);
+    const ease = 1 - (1 - e) * (1 - e) * (1 - e);
+    const rope = 34 + 260 * (1 - ease); // descends from high up, then holds a short rope
+    const sway = Math.sin(t * 1.7) * 6;
+    const bx = hx - sway;
+    const by = hy - rope;
+    drawBalloonAt(ctx, bx, by, v.color, P, 1, t, !v.isLocal);
+    // rope from the basket to the hands
+    ctx.strokeStyle = rgba(P.sil, 0.85);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.quadraticCurveTo((bx + hx) / 2 + sway * 0.4, (by + hy) / 2, hx, hy);
+    ctx.stroke();
+  }
+
+  /** Balloons that let go after a rescue: rise and drift away, fading. Call once per frame. */
+  drawDeparting(ctx, P, dt) {
+    for (let i = this.departing.length - 1; i >= 0; i--) {
+      const b = this.departing[i];
+      b.age += dt;
+      if (b.age > 3) {
+        this.departing.splice(i, 1);
+        continue;
+      }
+      const u = b.age / 3;
+      const x = b.x + b.age * 26 + Math.sin(b.age * 1.4) * 6;
+      const y = b.y - b.age * (40 + b.age * 22);
+      drawBalloonAt(ctx, x, y, b.color, P, (1 - u) * (1 - u), P.t, b.ghost, 1 - 0.25 * u);
+    }
+  }
+
   /** Name tag above a ghost, in screen space. */
   drawTag(ctx, v, sx, sy, alpha, P) {
     if (alpha <= 0.02) return;
@@ -501,6 +670,71 @@ export class RiderRenderer {
     ctx.fill();
     ctx.restore();
   }
+}
+
+const JOINTS = ['f1', 'f2', 'k1', 'k2', 'h', 'n', 'hd', 'e1', 'e2', 'a1', 'a2'];
+/* contact probes (board-local, unscaled): [x, y, extra radius] triples; 999 = joint index */
+const CONTACT_BOARD = [-17, 0, 0, 17, 0, 0, -12, 0, 0, 12, 0, 0];
+const CONTACT_JOINTS = ['hd', 'h', 'k1', 'k2', 'a1', 'a2', 'n'];
+const CONTACT_CRASH = [-17, 0, 0, 17, 0, 0, 999, 0, 4.5, 999, 1, 3, 999, 2, 2, 999, 3, 2, 999, 4, 1.5, 999, 5, 1.5, 999, 6, 3];
+
+function wrapAngle(a) {
+  return Math.atan2(Math.sin(a), Math.cos(a));
+}
+
+/** Hot-air balloon with its basket hanging at (bx, by). */
+function drawBalloonAt(ctx, bx, by, color, P, alpha, t, ghost, k = 1) {
+  if (alpha <= 0.01) return;
+  const col = mix(mix(hex(color), P.sil, 0.12 + 0.25 * P.night), P.haze, ghost ? 0.25 : 0);
+  const light = mix(col, [255, 255, 255], 0.38);
+  const R = 26 * k;
+  const cy = by - 14 * k - R * 1.15; // envelope centre
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // envelope: round top tapering to the mouth
+  ctx.beginPath();
+  ctx.moveTo(bx - R * 0.32, cy + R * 1.0);
+  ctx.bezierCurveTo(bx - R * 1.25, cy + R * 0.35, bx - R * 1.15, cy - R * 1.05, bx, cy - R * 1.05);
+  ctx.bezierCurveTo(bx + R * 1.15, cy - R * 1.05, bx + R * 1.25, cy + R * 0.35, bx + R * 0.32, cy + R * 1.0);
+  ctx.closePath();
+  ctx.fillStyle = rgba(col);
+  ctx.fill();
+  // lighter gores (vertical stripes) + a soft lit side
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = rgba(light);
+  for (const off of [-0.55, 0.05]) {
+    ctx.beginPath();
+    ctx.ellipse(bx + off * R, cy, R * 0.18, R * 1.3, 0, 0, TAU);
+    ctx.fill();
+  }
+  ctx.fillStyle = rgba(P.shadeDeep || P.sil, 0.25);
+  ctx.beginPath();
+  ctx.ellipse(bx + R * 0.95, cy + R * 0.1, R * 0.55, R * 1.4, 0, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+  // mouth band + suspension lines + basket
+  ctx.fillStyle = rgba(P.sil);
+  ctx.fillRect(bx - R * 0.34, cy + R * 0.98, R * 0.68, 2.2 * k);
+  ctx.strokeStyle = rgba(P.sil, 0.8);
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(bx - R * 0.32, cy + R * 1.05);
+  ctx.lineTo(bx - 5 * k, by - 7 * k);
+  ctx.moveTo(bx + R * 0.32, cy + R * 1.05);
+  ctx.lineTo(bx + 5 * k, by - 7 * k);
+  ctx.stroke();
+  ctx.fillStyle = rgba(mix([120, 80, 50], P.sil, 0.35 + 0.35 * P.night));
+  ctx.fillRect(bx - 6 * k, by - 7 * k, 12 * k, 8 * k);
+  // burner flame flickering in the mouth
+  const fl = 0.7 + 0.3 * Math.sin(t * 17) * Math.sin(t * 7.3 + 1);
+  ctx.fillStyle = `rgba(255,190,90,${0.9 * fl})`;
+  ctx.beginPath();
+  ctx.moveTo(bx - 2.5 * k, cy + R * 1.0);
+  ctx.quadraticCurveTo(bx, cy + R * (0.55 - 0.25 * fl), bx + 2.5 * k, cy + R * 1.0);
+  ctx.fill();
+  if (P.glow) P.glow(bx, cy + R * 0.85, 34 * k, (0.25 + 0.6 * P.night) * fl * alpha);
+  ctx.restore();
 }
 
 function set(p, x, y) {

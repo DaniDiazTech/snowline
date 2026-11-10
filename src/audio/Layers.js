@@ -93,7 +93,7 @@ export class Layers {
     const mode = view.mode;
     const grind = mode === 'grind';
     const ground = mode === 'ground' || mode === 'finished' || grind;
-    const air = mode === 'air';
+    const air = mode === 'air' || mode === 'rescue';
     const amt = clamp(view.weatherAmt || 0, 0, 1);
     const w = view.weather;
 

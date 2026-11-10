@@ -26,6 +26,11 @@ export class MockRider {
     this.grind = null;
   }
 
+  inChasm(x) {
+    for (const f of this.course.featuresIn(x - 1, x + 1)) if (f.type === FeatureType.CHASM && x > f.x0 && x < f.x1) return f;
+    return null;
+  }
+
   start() {
     this.state.mode = RiderMode.GROUND;
   }
@@ -119,7 +124,13 @@ export class MockRider {
         d = Math.atan2(Math.sin(d), Math.cos(d));
         const impact = Math.min(1, Math.max(0, (s.vy - 300) / 1200));
         s.y = gy;
-        if (Math.abs(d) > 0.9) {
+        if (s.y > c.heightAt(s.x) - 1 && this.inChasm(s.x)) {
+          // fell into a pit: lifted across to the far lip
+          const ch = this.inChasm(s.x);
+          s.mode = RiderMode.RESCUE;
+          this.rescue = { t: 0, x0: s.x, y0: s.y, x1: ch.x1 + 40, y1: c.heightAt(ch.x1 + 40) };
+          ev.push({ type: SimEvent.RESCUE_START, data: { featureId: ch.id, duration: 3, toX: this.rescue.x1, toY: this.rescue.y1 } });
+        } else if (Math.abs(d) > 0.9) {
           s.mode = RiderMode.CRASHED;
           this.crashT = 1.2;
           s.scarf = 0.1;
@@ -127,7 +138,8 @@ export class MockRider {
         } else {
           s.mode = RiderMode.GROUND;
           s.angle = ang;
-          ev.push({ type: SimEvent.LAND, data: { clean: true, impact } });
+          const sketchy = Math.abs(d) > 0.45;
+          ev.push({ type: SimEvent.LAND, data: { clean: !sketchy, sketchy, impact } });
           if (this.flip) {
             s.scarf = Math.min(1, s.scarf + 0.2);
             s.boostT = 3.5;
@@ -140,6 +152,22 @@ export class MockRider {
           s.vx = Math.cos(ang) * v;
           s.vy = Math.sin(ang) * v;
         }
+      }
+    } else if (s.mode === RiderMode.RESCUE) {
+      const r = this.rescue;
+      r.t += dt;
+      const u = Math.min(1, r.t / 3);
+      const e = u * u * (3 - 2 * u);
+      const px = s.x;
+      s.x = r.x0 + (r.x1 - r.x0) * e;
+      s.y = r.y0 + (r.y1 - r.y0) * Math.min(1, u * 1.3) - Math.sin(Math.PI * u) * 170;
+      s.vx = (s.x - px) / dt;
+      s.vy = 0;
+      s.angle = 0.2;
+      if (u >= 1) {
+        s.mode = RiderMode.GROUND;
+        s.y = c.heightAt(s.x);
+        s.vx = 300;
       }
     } else if (s.mode === RiderMode.GRIND) {
       const f = this.grind;

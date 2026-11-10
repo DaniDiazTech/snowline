@@ -168,11 +168,11 @@ export class Effects {
       if (age < 0 || age > dur) this.burst = null;
       else {
         const u = age / dur;
-        const n = 10 + 8 * lv;
+        const n = 10 + 6 * lv;
         const r0 = 30 + u * (120 + 90 * lv);
-        const len = (40 + 50 * lv) * (1 - u * 0.5);
+        const len = (36 + 34 * lv) * (1 - u * 0.5);
         ctx.lineCap = 'round';
-        ctx.strokeStyle = `rgba(255,255,255,${(0.5 + 0.15 * lv) * (1 - u)})`;
+        ctx.strokeStyle = `rgba(255,255,255,${(0.5 + 0.08 * lv) * (1 - u) * (1 - u)})`;
         ctx.lineWidth = 1.2 + 0.6 * lv;
         ctx.beginPath();
         for (let i = 0; i < n; i++) {

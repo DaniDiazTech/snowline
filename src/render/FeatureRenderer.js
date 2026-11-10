@@ -117,11 +117,47 @@ function buildRock(v) {
 }
 
 function ramp(ctx, f, P, course) {
-  // two little marker flags just before the lip
+  // packed-snow kicker: a compacted highlight along the run-up, a wooden edge at the lip,
+  // two marker flags just before it
   const lip = f.lipX ?? f.x1 ?? f.x;
+  const x0 = Math.max(f.x0 ?? lip - 160, lip - 220);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = rgba(mix(P.snow, [255, 255, 255], 0.6), 0.9);
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  for (let x = x0; x <= lip; x += 8) {
+    const y = course.heightAt(x) + 1.5;
+    if (x === x0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // ridges of packed snow on the ramp face
+  ctx.strokeStyle = rgba(P.shade, 0.35);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = lip - 90; x < lip - 12; x += 14) {
+    const y = course.heightAt(x);
+    ctx.moveTo(x, y + 3);
+    ctx.lineTo(x + 6, course.heightAt(x + 6) + 6);
+  }
+  ctx.stroke();
+  // wooden edge along the last stretch before the lip + a stake under it
+  const wood = mix([150, 100, 60], P.sil, 0.3 + 0.4 * P.night);
+  ctx.strokeStyle = rgba(wood);
+  ctx.lineWidth = 3.4;
+  ctx.beginPath();
+  for (let x = lip - 34; x <= lip; x += 4) {
+    const y = course.heightAt(x) + 1;
+    if (x === lip - 34) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = rgba(mix(wood, P.sil, 0.35));
+  const ly = course.heightAt(lip);
+  ctx.fillRect(lip - 2.5, ly, 3, 10);
   for (const [dx, col] of [
-    [-8, 0],
-    [-46, 1],
+    [-12, 0],
+    [-52, 1],
   ]) {
     const x = lip + dx;
     const gy = course.heightAt(x);

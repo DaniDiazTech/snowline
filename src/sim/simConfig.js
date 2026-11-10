@@ -10,22 +10,24 @@ export { GRAVITY, JUMP_VY, REF_SLOPE, REF_SPEED, DRAG_K, RAMP_POP, BODY_CENTER, 
 export const SIM = Object.freeze({
   /* ---- ground ---- */
   START_SPEED: 140, // px/s given at GO
-  MIN_SPEED: 110, // below this a "skate push" kicks in (nobody can stall on a rise)
-  PUSH_ACCEL: 260, // px/s² of that push
+  // "Back to pace": below RECOVER_BELOW × cruise a push of up to RECOVER_ACCEL (fading to 0 at the
+  // threshold) brings the rider back near cruise within ~1.2 s after any slowdown; no stalls.
+  RECOVER_BELOW: 0.85,
+  RECOVER_ACCEL: 560, // px/s²
   GROUND_ANGLE_SHARPNESS: 16, // how fast the board follows the slope on the ground (1/s)
   LEAVE_LOOKAHEAD_TICKS: 4, // ballistic look-ahead used to decide when the ground falls away
   LEAVE_EPS: 1.2, // px the ballistic arc must be above the snow at the end of the look-ahead
   MAX_GROUND_SPEED: 1400, // hard safety clamp
 
   /* ---- jump / input ---- */
-  JUMP_BUFFER: 0.12, // s a press is remembered before touching down
-  COYOTE: 0.08, // s after rolling off an edge during which a press still jumps
+  JUMP_BUFFER: 0.15, // s a press is remembered before touching down
+  COYOTE: 0.12, // s after rolling off an edge during which a press still jumps
   RAMP_ZONE_AFTER_LIP: 50, // px after a ramp lip where a jump still gets RAMP_POP
 
   /* ---- air ---- */
-  // Ground resistance k·v² = aero (≈70%) + snow friction (≈30%). In the air only the aero part acts,
-  // on the horizontal component (vertical motion is a pure parabola under g).
-  AIR_DRAG_MULT: 0.7,
+  // Ground resistance k·v² = aero (≈45%) + snow friction (≈55%). In the air only the aero part acts,
+  // on the horizontal component (vertical motion is a pure parabola under g), so jumps feel carried.
+  AIR_DRAG_MULT: 0.45,
   HOLD_T: 0.16, // s the button must be held continuously before any rotation (a tap = a plain jump)
   FLIP_RAMP_T: 0.1, // s over which the spin ramps in once HOLD_T is reached
   FLIP_RATE: (Math.PI * 2) / 0.6, // rad/s at full spin (≈0.6 s per 360°)
@@ -41,9 +43,20 @@ export const SIM = Object.freeze({
   ASSIST_GAIN: 9, // assisted spin rate per rad of remaining error (1/s)
   RELEASE_DAMP: 35, // how fast angular velocity converges to the assisted rate after release (1/s)
   FLIP_COUNT_TOL: 0.6, // rad: a flip counts once rotation reaches 2π - this
-  LAND_CLEAN_ANGLE: (50 * Math.PI) / 180, // max |board - slope| for a clean landing
+  // Landings, graded by |board − slope| at touchdown.
+  LAND_CLEAN_ANGLE: (30 * Math.PI) / 180, // clean: full tangential speed, combo banked
+  LAND_SKETCHY_ANGLE: (65 * Math.PI) / 180, // sketchy: slides it out (combo lost, SKETCHY_LOSS speed, wobble); beyond = crash
+  SKETCHY_LOSS: 0.12,
+  WOBBLE_T: 0.35, // s of board wobble after a sketchy landing
+  WOBBLE_AMP: 0.05, // rad per tick-scale of that wobble
+  LAND_EASE_T: 0.15, // s during which the board eases onto the slope fast after a touchdown / line catch
+  LAND_ANGLE_SHARPNESS: 30, // 1/s (≈ 90% in ~80 ms)
+  BOARD_HALF: 16, // px: half board length (contact point is lifted so no tip digs into the snow)
+  TIP_GRACE: 0.08, // s after take-off before a board tip can count as a touchdown
+  SQUASH_REF: 700, // normal impact speed (px/s) that gives a full crouch dip
+  SQUASH_RECOVER: 2.5, // 1/s
   MIN_LAND_SPEED: 60, // px/s floor after a landing onto a steep up-slope
-  IMPACT_REF: 900, // normal speed (px/s) that maps to impact = 1
+  IMPACT_REF: 900, // normal speed (px/s) that maps to impact = 1 (LAND event)
   MICRO_AIR: 0.12, // s: natural (no jump) air phases shorter than this emit no LAND
   PROXIMITY_DIST: 30, // head-to-snow distance for a Proximity Flip (px)
   BIG_AIR_T: 1.6, // s of air for Big Air
@@ -68,19 +81,31 @@ export const SIM = Object.freeze({
   LOG_HOP_VY: 380, // px/s upward after landing on top of a log
   LOG_HOP_TOL: 10, // px below the log top that still counts as landing on it
   CAMPFIRE_HIT: 0.9,
-  CHASM_FALL_DEPTH: 70, // px below the lip line at which a rider is "in" the chasm
   CHASM_POP_TOL: 16, // px below the far lip that still pops up onto it
 
   /* ---- crash / respawn ---- */
-  CRASH_T: 1.1,
-  CHASM_RESPAWN_T: 1.6,
-  CRASH_FRICTION: 2.6, // 1/s exponential slide decay
+  CRASH_T: 0.8, // s of tumble
+  CRASH_GETUP_T: 0.25, // last part of the tumble: spin settles, board comes back onto the slope
+  CRASH_KEEP: 0.85, // share of the tangential speed kept when the tumble starts
+  CRASH_SLIDE_TO: 0.6, // the sliding tumble eases toward this × cruise (never a dead stop)
+  CRASH_SLIDE_RATE: 2.2, // 1/s
+  CRASH_THROW_VY: 320, // px/s: hitting an obstacle throws the rider up and over it
+  CRASH_MIN_THROW: 0.55, // × cruise: minimum forward speed of that throw
   CRASH_SPIN: 13, // rad/s initial tumble spin
   CRASH_SPIN_DECAY: 2.2, // 1/s
-  RESPAWN_SPEED: 130,
-  RESPAWN_INVULN: 1.0, // s immune to rocks/campfires after a respawn
-  RESPAWN_CLEAR: 30, // px placed past an obstacle on respawn
-  CHASM_RESPAWN_OFFSET: 70, // px past the far lip
+  RESPAWN_MIN_FRAC: 0.55, // × cruise: speed when getting up
+  RESPAWN_INVULN: 1.0, // s immune to obstacles after getting up / being set down
+  RESPAWN_CLEAR: 30, // px placed past an obstacle if the tumble ended inside it
+
+  /* ---- pit rescue ---- */
+  RESCUE_T: 3.0, // s: the true cost of falling into a pit
+  RESCUE_DEPTH: 40, // px below the lip line that triggers the rescue
+  RESCUE_LAND_OFFSET: 90, // px past the far edge where the rider is set down
+  RESCUE_ARC_H: 150, // px above the higher lip at the top of the lift
+  RESCUE_LEAD: 170, // px: length of the final approach along the far slope
+  RESCUE_SETDOWN_H: 50, // px: that approach starts this far above the slope
+  RESCUE_SWAY: 0.12, // rad of gentle sway while carried
+  RESCUE_RELEASE: 0.6, // × cruise: speed when set down (the path ends at this speed)
 
   /* ---- speed rewards ---- */
   // Banking a combo: an instant forward kick (px/s, felt at once) plus a timed cruise boost.
@@ -89,12 +114,14 @@ export const SIM = Object.freeze({
     Object.freeze({ min: 60, bonus: 0.3, duration: 3.0, kick: 96 }),
     Object.freeze({ min: 200, bonus: 0.36, duration: 4.0, kick: 120 }),
   ]),
-  BOOST_FULL_FRAC: 0.3, // boost runs at full power for this fraction, then fades smoothly
+  BOOST_FULL_FRAC: 0.3,
+  BOOST_EASE: 20, // 1/s: the applied boost eases in (~0.15 s) and out instead of switching
+  KICK_RATE: 1200, // px/s²: the bank kick is delivered at this rate (72-120 px/s → 0.06-0.1 s) // boost runs at full power for this fraction, then fades smoothly
   BOOST_PUSH: 300, // px/s² of extra push per +100% tier bonus, while below the boosted cruise speed
   BOOST_EXTEND: 0.35, // re-banking adds this fraction of the overlap
   BOOST_MAX_T: 6, // s cap
   SHIELD_FRAC: 0.6, // shield during the first 60% of a boost
-  MAX_SPEED_MULT: 1.33, // cap on scarf × boost cruise multiplier (keeps long tier-3 chains readable)
+  MAX_SPEED_MULT: 1.26, // cap on scarf × boost cruise multiplier (keeps long tier-3 chains readable)
   SCARF_SPEED_BONUS: 0.06, // full scarf raises cruise speed by 6% (scarf mostly feeds the boost cap headroom + score)
   SCARF_PER_POINT: 0.009, // scarf gained per banked combo point (total)
   SCARF_MAX_GAIN: 0.25, // per bank

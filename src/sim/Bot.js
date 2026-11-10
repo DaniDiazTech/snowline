@@ -18,7 +18,7 @@
  */
 import { RiderMode, SimEvent, FeatureType, GrindKind, TICK_DT } from '../contracts.js';
 import { createRandom } from '../math/random.js';
-import { clamp, lerp, TAU } from '../math/utils.js';
+import { clamp, lerp, wrapAngle, TAU } from '../math/utils.js';
 import { RiderSim } from './RiderSim.js';
 import { SIM } from './simConfig.js';
 
@@ -32,7 +32,7 @@ const BOT = Object.freeze({
 });
 
 /** Deterministic controller shared by planning runs and the real rider. */
-function control(sim, plan) {
+export function control(sim, plan) {
   const st = sim.state;
   const p = sim._p;
   if (st.mode === RiderMode.IDLE || st.mode === RiderMode.FINISHED || st.mode === RiderMode.CRASHED) return false;
@@ -45,7 +45,7 @@ function control(sim, plan) {
   const rot = p.takeoffAngle - st.angle;
   if (rot > 0.6 && !p.prevHeld) return false; // released once: never re-press (would buffer a jump)
   const landAngle = plan.landAngle ?? Math.atan(sim.course.slopeAt(st.x));
-  const target = n * TAU + (p.takeoffAngle - landAngle);
+  const target = n * TAU + wrapAngle(p.takeoffAngle - landAngle); // angles are unwrapped across flips
   const overshoot = Math.abs(st.angVel) / SIM.RELEASE_DAMP + (plan.releaseBias || 0);
   return rot + overshoot < target;
 }
@@ -64,6 +64,7 @@ export class Bot {
     this.rng = createRandom((seed >>> 0) ^ 0x6a09e667);
     this.opts = { flips: true, grinds: true, tricks: true, ...options };
     this.scratch = new RiderSim(course);
+    this.skipped = new Map(); // pit id → decided to (not) jump it
     this.plan = { jumpTick: -1, flips: 0 };
     this.nextLook = 0;
     this.nextTrickTick = 0;
@@ -117,19 +118,24 @@ export class Bot {
   run(real, plan, maxTicks, stopAfterLanding) {
     const sc = this.scratch;
     sc.copyFrom(real);
-    const r = { crash: false, crashTick: -1, points: 0, grinds: [], leftGround: false, landTick: -1, landSlope: null, firstAirTick: -1, clean: false };
+    const r = { crash: false, crashTick: -1, points: 0, grinds: [], leftGround: false, landTick: -1, landSlope: null, firstAirTick: -1, clean: false, flips: 0 };
     const startPhys = sc._p.phys;
     for (let k = 1; k <= maxTicks; k++) {
       const held = control(sc, plan);
       const evs = sc.step({ held });
       for (const e of evs) {
-        if (e.type === SimEvent.CRASH) {
+        if (e.type === SimEvent.CRASH || e.type === SimEvent.RESCUE_START) {
           r.crash = true;
           r.crashTick = k;
+          r.pit = e.type === SimEvent.RESCUE_START ? e.data.featureId : -1;
           return r;
         }
-        if (e.type === SimEvent.TRICK) r.points += e.data.points;
+        if (e.type === SimEvent.TRICK) {
+          r.points += e.data.points;
+          if (/backflip/i.test(e.data.name)) r.flips++;
+        }
         else if (e.type === SimEvent.GRIND_START) r.grinds.push(e.data.featureId);
+        else if (e.type === SimEvent.LAND && !e.data.clean) r.sketchy = true;
         else if (e.type === SimEvent.LAND && e.data.clean) {
           r.landTick = k;
           r.clean = true;
@@ -167,6 +173,12 @@ export class Bot {
 
     // 1. Hazard ahead if we do nothing?
     const base = this.run(real, this.plan, BOT.BASE_HORIZON, false);
+    // Beginners sometimes misjudge a wide pit and ride straight in (skilled never).
+    if (base.crash && base.pit >= 0 && !this.skipped.has(base.pit)) {
+      const pit = real.course.features[base.pit];
+      this.skipped.set(base.pit, pit.x1 - pit.x0 >= 200 && this.rng.chance((1 - this.skill) * 0.35));
+    }
+    if (base.crash && base.pit >= 0 && this.skipped.get(base.pit)) return;
     if (base.crash) {
       const good = [];
       const from = Math.max(1, base.crashTick - BOT.JUMP_SCAN_BACK);
@@ -215,7 +227,7 @@ export class Bot {
       for (const f of course.featuresIn(st.x, st.x + lookPx)) if (f.type === FeatureType.GRIND && f.kind !== GrindKind.ICE) return; // wait for the grind
     }
     const r = this.run(real, { jumpTick: st.tick + jumpK, flips: 1 }, jumpK + BOT.AIR_HORIZON, true);
-    if (!r.crash && r.clean) {
+    if (!r.crash && r.clean && !r.sketchy) {
       this.plan = { jumpTick: st.tick + jumpK, flips: 0 };
       this.scheduleTrick(st.tick + jumpK + 30);
     } else if (jumpK === 1) {
@@ -242,7 +254,7 @@ export class Bot {
           plan.landAngle = r.landSlope;
           r = this.run(real, plan, BOT.AIR_HORIZON, true);
         }
-        if (r.crash || !r.clean) continue;
+        if (r.crash || !r.clean || r.sketchy || r.flips < n) continue;
         if (this.releaseErr > 0) {
           const lo = this.run(real, { ...plan, releaseBias: -this.releaseErr }, BOT.AIR_HORIZON, true);
           const hi = this.run(real, { ...plan, releaseBias: this.releaseErr }, BOT.AIR_HORIZON, true);

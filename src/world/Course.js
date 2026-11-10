@@ -61,9 +61,9 @@ export const COURSE = Object.freeze({
   GAP_MAX_M: 125,
   // Pits: guaranteed count per length (first one within the first ~30%), three width classes.
   PITS: { sprint: 3, classic: 5, marathon: 8 },
-  PIT_NARROW: [80, 120], // crevasse: any jump clears it, no kicker
-  PIT_MEDIUM: [150, 195], // kicker in front
-  PIT_WIDE: [210, 250], // kicker in front; + up to 30 px with difficulty
+  PIT_NARROW: [80, 120], // crevasse: small kicker, any jump clears it
+  PIT_MEDIUM: [165, 205], // needs a jump at cruise (riding off the kicker is not enough)
+  PIT_WIDE: [215, 250], // jump from the kicker (or boost speed); + up to 30 px with difficulty
   PIT_DOUBLE_PAD: [430, 540], // landing pad between the two pits of a double pit
   PIT_DEPTH: 560, // pit floor below the lower lip
   ROCK_R: [14, 30],
@@ -314,7 +314,7 @@ export function generateCourse(seed, settings) {
   // Kicker bumps (y up = negative offset). Quadratic face, C1 Hermite fall-off behind the lip.
   for (const p of pieces) {
     if (p.type === 'kicker') addKicker(p.lipX, p.rampLen, p.rampH, 70);
-    if (p.type === 'chasm' && p.rampLen > 0) addKicker(p.cx0, p.rampLen, p.rampH, Math.min(60, (p.cx1 - p.cx0) * 0.4));
+    if (p.type === 'chasm') for (const [px0, px1, rl, rh] of p.pits) addKicker(px0, rl, rh, Math.min(60, (px1 - px0) * 0.4));
   }
   function addKicker(lipX, rampLen, rampH, fallLen) {
     const a = lipX - rampLen;
@@ -505,10 +505,9 @@ export function generateCourse(seed, settings) {
         break;
       }
       case 'chasm': {
-        if (p.rampLen > 0) {
-          features.push({ type: FeatureType.RAMP, x: p.cx0 - p.rampLen, x0: p.cx0 - p.rampLen, x1: p.cx0, lipX: p.cx0, size: p.rampH, variant: 0 });
-          jumpArcFrom(p.cx0 - 2, RAMP_POP, baseSlopeAt(p.cx0 - 1), { max: 14 });
-        } else jumpArcFrom(p.cx0 - 30, 0, null, { max: 12 });
+        // Every pit has a kicker on its near lip.
+        for (const [px0, , rl, rh] of p.pits) features.push({ type: FeatureType.RAMP, x: px0 - rl, x0: px0 - rl, x1: px0, lipX: px0, size: rh, variant: 0 });
+        jumpArcFrom(p.cx0 - 2, RAMP_POP, baseSlopeAt(p.cx0 - 1), { max: 14 });
         break;
       }
       case 'obstacles': {
@@ -777,14 +776,15 @@ function planPiece(rng, type, x, d) {
       const R = (a) => lerp(a[0], a[1], rng.next());
       const width = cls === 'narrow' ? R(COURSE.PIT_NARROW) : cls === 'medium' ? R(COURSE.PIT_MEDIUM) : R(COURSE.PIT_WIDE) + 30 * d * rng.next();
       p.pitClass = cls;
-      p.rampLen = cls === 'narrow' ? 0 : rng.range(120, 150);
-      p.rampH = cls === 'wide' ? rng.range(18, 24) : rng.range(15, 21);
+      // Kicker on the near lip of every pit: [x0, x1, rampLen, rampH].
+      p.rampLen = cls === 'narrow' ? rng.range(100, 120) : rng.range(120, 150);
+      p.rampH = cls === 'wide' ? rng.range(18, 24) : cls === 'medium' ? rng.range(13, 18) : rng.range(10, 14);
       p.cx0 = x + 520;
       p.cx1 = p.cx0 + width;
-      p.pits = [[p.cx0, p.cx1]];
+      p.pits = [[p.cx0, p.cx1, p.rampLen, p.rampH]];
       if (cls !== 'wide' && rng.chance(0.18 + 0.12 * d)) {
         const a = p.cx1 + R(COURSE.PIT_DOUBLE_PAD);
-        p.pits.push([a, a + R(COURSE.PIT_NARROW) + 20 * rng.next()]);
+        p.pits.push([a, a + R(COURSE.PIT_NARROW) + 20 * rng.next(), 100, rng.range(10, 14)]);
       }
       p.x1 = p.pits[p.pits.length - 1][1] + 800;
       break;

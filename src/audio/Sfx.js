@@ -4,10 +4,10 @@ import { Voices } from './Voices.js';
 const PENTA = [0, 2, 4, 7, 9]; // major pentatonic degrees
 const degToSemi = (n) => PENTA[n % 5] + 12 * Math.floor(n / 5);
 
-const EVENTS = new Set(['jump', 'land', 'trick', 'combo', 'boost', 'grindStart', 'grindEnd', 'rockSmash', 'pickup', 'crash', 'respawn', 'chasmClear', 'finish']);
+const EVENTS = new Set(['jump', 'land', 'trick', 'combo', 'boost', 'grindStart', 'grindEnd', 'rockSmash', 'pickup', 'crash', 'respawn', 'chasmClear', 'rescueStart', 'finish']);
 
 /** Minimum spacing (s) between two instances of the same sound; extra triggers are dropped. */
-const GAP = { jump: 0.12, land: 0.12, trick: 0.07, combo: 0.22, boost1: 0.5, boost2: 0.6, boost3: 0.7, coin: 0.045, grindStart: 0.25, grindEnd: 0.25, respawn: 0.5, rockSmash: 0.08, click: 0.05, countdown: 0.2 };
+const GAP = { jump: 0.12, land: 0.12, trick: 0.07, combo: 0.22, boost1: 0.5, boost2: 0.6, boost3: 0.7, coin: 0.045, grindStart: 0.25, grindEnd: 0.25, respawn: 0.5, rescueStart: 1, rockSmash: 0.08, click: 0.05, countdown: 0.2 };
 /** Per-sound loudness trims, measured with snowline-tests/audio/mix-qa.mjs (peak over the music+carve bed). */
 const TRIM = { jump: 0.409, land: 0.72, trick: 1.122, combo: 0.793, boost1: 1.364, boost2: 1.537, boost3: 1.682, grindStart: 0.785, grindEnd: 1.484, rockSmash: 0.496, coin: 1.056, feather: 1.125, magnet: 1.938, respawn: 1.574, chasmClear: 1.586, crash: 1.988, finish: 1.878, click: 1.147, join: 1.506, leave: 1.682, countdown: 1.054, go: 0.751, uifinish: 1.912, win: 2.804 };
 
@@ -90,6 +90,11 @@ export class Sfx {
     const imp = clamp(Number(d.impact ?? 0.4) || 0, 0, 1);
     v.tone(t, { f: 120, f1: 45, dur: 0.18 + 0.18 * imp, g: 0.17 + 0.11 * imp });
     v.noise(t, { type: 'lowpass', f: 1200, f1: 250, q: 0.5, dur: 0.12 + 0.14 * imp, g: 0.09 + 0.06 * imp });
+    if (d.sketchy) {
+      // scrappier: a scuffing hiss and a dull second thud instead of the clean chime
+      v.noise(t + 0.02, { type: 'bandpass', f: 2400, f1: 900, q: 1.1, dur: 0.22, g: 0.1 });
+      v.tone(t + 0.07, { f: 90, f1: 50, dur: 0.14, g: 0.1 });
+    }
     if (d.clean) {
       // E - F# - A (in key)
       [1318.5, 1480, 1760].forEach((f, i) =>
@@ -205,6 +210,16 @@ export class Sfx {
     if (!this._begin('respawn')) return;
     // G - B - D
     [392, 493.88, 587.33].forEach((f, i) => this.v.tone(t + 0.08 * i, { f, dur: 0.7, g: 0.06, a: 0.02, wet: 0.7 }));
+  }
+
+  /** Fell into a pit: a soft rising whoosh and a few airy notes while the balloon lifts the rider across. */
+  _rescueStart(t) {
+    if (!this._begin('rescueStart')) return;
+    const v = this.v;
+    v.noise(t, { f: 300, f1: 1800, q: 0.8, dur: 1.2, a: 0.4, g: 0.06, wet: 0.4 });
+    v.tone(t, { f: 220, f1: 440, dur: 1.4, a: 0.5, g: 0.04, type: 'triangle', lp: 1400, wet: 0.5 });
+    // D - F# - A - D, slowly climbing
+    [mtof(74), mtof(78), mtof(81), mtof(86)].forEach((f, i) => v.tone(t + 0.25 + i * 0.3, { f, dur: 0.8, g: 0.035, a: 0.05, wet: 0.7 }));
   }
 
   _chasmClear(t) {

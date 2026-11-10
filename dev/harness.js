@@ -8,6 +8,9 @@
  *   seed= weather= start=      course seed + settings (weather/startTime)
  *   length=sprint|classic|marathon
  *   near=<type>   POSE at the nth (nth=) feature/decor of a type (rock, chasm, bunting, roof, ice, campfire, hut, windmill…), offset dx=
+ *   mode=land&lt=<ms after touchdown>&tilt=<deg>&impact=&sketchy=1   scripted landing
+ *   mode=crashslide&ct=<ms after crash>                                 scripted sliding crash + get-up
+ *   mode=rescue&ru=<ms after lift start (0..3000, >3000 = set down)>   scripted pit rescue (near=chasm)
  *   x=<world x>   POSE mode: put the local rider at x (instead of simulating)
  *   mode=air|grind|ground|crashed|idle|finished   pose mode (with x)
  *   air=<px>      height above ground for mode=air (default 170)
@@ -15,6 +18,7 @@
  *   crouch= scarf= angle=     pose overrides (angle in degrees)
  *   boost=0..3 shield=1 hover=1
  *   event=land|crash|smash|pickup|boost|jump|finish|combo (level=1..3 for boost; evframes=k frames before the end)   fire one effect shortly before the frame
+ *   pit=<n>&warm=<ms>  (sim mode) drop the local rider into the nth pit at the start of the frozen window
  *   ghosts=<n>    number of other riders (bots)
  *   freeze=1      render a deterministic warm-up, then stop (for screenshots)
  *   rate=<k>      live playback speed multiplier
@@ -119,7 +123,9 @@ async function main() {
     if (useSim) {
       const sim = new mods.RiderSim(course);
       const bot = new mods.Bot(course, seed * 13 + i * 101, i === 0 ? 0.8 : 0.45 + 0.08 * (i % 6));
-      return { sim, bot, step: () => sim.step(bot.decide(sim.state)), start: () => sim.start() };
+      const r = { sim, bot, mute: false, start: () => sim.start() };
+      r.step = () => sim.step(r.mute ? { held: false } : bot.decide(sim.state));
+      return r;
     }
     const sim = new MockRider(course, seed * 13 + i * 101, 0.7);
     return { sim, step: () => sim.step(), start: () => sim.start() };
@@ -188,6 +194,74 @@ async function main() {
     return viewOf(v, i === 0 ? 'local' : `g${i}`, i, i === 0);
   };
 
+  // ---- scripted sequences (pose mode): landing / sliding crash / pit rescue ----
+  // rel = ms relative to the key moment (touchdown, crash, lift start)
+  const SEQ = ['land', 'crashslide', 'rescue'];
+  const seqMode = SEQ.includes(Q.get('mode')) ? Q.get('mode') : null;
+  const seqRel = () => num(seqMode === 'land' ? 'lt' : seqMode === 'crashslide' ? 'ct' : 'ru', 0);
+  let seqChasm = null;
+  if (seqMode === 'rescue') {
+    const x = num('x', course.startX + 500);
+    seqChasm = course.features.filter((f) => f.type === FeatureType.CHASM).sort((a, b) => Math.abs(a.x0 - x) - Math.abs(b.x0 - x))[0];
+  }
+  const seqView = (rel, i) => {
+    const speed = num('speed', 520);
+    const X0 = num('x', course.startX + 500) + (i ? -95 * i : 0);
+    const id = i === 0 ? 'local' : `g${i}`;
+    const base = { mode: RiderMode.GROUND, crouch: 0.1, scarf: num('scarf', 0.7), boostT: 0, boostLevel: 0, shield: false, hoverT: 0 };
+    let st;
+    if (seqMode === 'land') {
+      const x = X0 + (speed * rel) / 1000;
+      const ang = Math.atan(course.slopeAt(x));
+      if (rel < 0) {
+        const tau = -rel / 1000;
+        const vy = 420 + 300 * num('impact', 0.7);
+        const h = vy * tau - 0.5 * 1200 * tau * tau * 0.4;
+        st = { ...base, mode: RiderMode.AIR, x, y: surfaceY(course, x) - Math.max(0, h), vx: speed, vy, angle: ang + (num('tilt', 12) * Math.PI) / 180 * Math.min(1, tau * 3 + 0.4), crouch: 0.25 };
+      } else {
+        const v = speed * 0.92;
+        st = { ...base, x, y: course.heightAt(x), vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, angle: ang, crouch: Math.max(0.1, 0.8 * Math.exp(-rel / 160) * num('impact', 0.7)) };
+      }
+    } else if (seqMode === 'crashslide') {
+      const T = rel / 1000;
+      const decay = Math.exp(-Math.max(0, T) / 0.9);
+      const dist = rel < 0 ? (speed * rel) / 1000 : speed * 0.9 * (1 - decay);
+      const x = X0 + dist;
+      const ang = Math.atan(course.slopeAt(x));
+      const v = rel < 0 ? speed : speed * decay;
+      if (rel < 0) st = { ...base, x, y: course.heightAt(x), vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, angle: ang };
+      else if (T < 1.3) st = { ...base, mode: RiderMode.CRASHED, x, y: course.heightAt(x), vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, angle: ang + 9 * (1 - decay) * 0.9, crouch: 0.6 };
+      else st = { ...base, x, y: course.heightAt(x), vx: Math.cos(ang) * Math.max(v, 140), vy: Math.sin(ang) * Math.max(v, 140), angle: ang, crouch: 0.4 * Math.exp(-(T - 1.3) / 0.3) };
+    } else {
+      // rescue: from the pit up and over to the far lip in 3 s
+      const c = seqChasm;
+      const u = rel / 3000;
+      const ya = Number.isFinite(c.y0) ? c.y0 : course.heightAt(c.x0 - 1);
+      const yb = Number.isFinite(c.y1) ? c.y1 : course.heightAt(c.x1 + 1);
+      if (u < 0) {
+        const x = c.x0 + 40 + u * 400;
+        st = { ...base, mode: RiderMode.AIR, x, y: ya + 80 + u * 260, vx: 400, vy: 600, angle: 0.5 };
+      } else if (u <= 1) {
+        const e = u * u * (3 - 2 * u);
+        const x = c.x0 + 40 + (c.x1 + 40 - (c.x0 + 40)) * e;
+        const lift = Math.sin(Math.PI * Math.min(1, u * 1.05)) * 170;
+        const y = ya + 80 + (yb - (ya + 80)) * Math.min(1, u * 1.3) - lift;
+        st = { ...base, mode: RiderMode.RESCUE, x, y, vx: 120, vy: -40, angle: 0.2 };
+      } else {
+        const x = c.x1 + 40 + (u - 1) * 600;
+        const ang = Math.atan(course.slopeAt(x));
+        st = { ...base, x, y: course.heightAt(x), vx: Math.cos(ang) * 300, vy: Math.sin(ang) * 300, angle: ang };
+      }
+    }
+    return viewOf(st, id, i, i === 0);
+  };
+  const seqEvent = (prevRel, rel) => {
+    if (prevRel >= 0 || rel < 0) return null;
+    if (seqMode === 'land') return { type: SimEvent.LAND, data: { clean: Q.get('sketchy') !== '1', sketchy: Q.get('sketchy') === '1', impact: num('impact', 0.7) } };
+    if (seqMode === 'crashslide') return { type: SimEvent.CRASH, data: { cause: 'landing' } };
+    return { type: SimEvent.RESCUE_START, data: { featureId: seqChasm?.id, duration: 3, toX: seqChasm?.x1, toY: 0 } };
+  };
+
   // ---- p5 ----
   const perfEl = document.getElementById('perf');
   const showPerf = Q.get('perf') === '1';
@@ -252,10 +326,23 @@ async function main() {
 
     /** Deterministic warm-up: 1.5 s of frames at a fixed 60 Hz ending exactly at t. */
     const renderFrozen = () => {
-      const warm = 1500;
+      const warm = num('warm', 1500);
       const dtMs = 1000 / 60;
       const t0 = pose ? targetMs - warm : Math.max(0, targetMs - warm);
-      if (pose) {
+      if (seqMode) {
+        const frames = Math.round(warm / dtMs);
+        const endRel = seqRel();
+        let prevRel = -1e9;
+        for (let k = 0; k <= frames; k++) {
+          const rel = endRel - (frames - k) * dtMs;
+          const local = seqView(rel, 0);
+          const others = [];
+          for (let i = 1; i <= nGhosts; i++) others.push(seqView(rel + 120 * i, i));
+          const ev = seqEvent(prevRel, rel);
+          prevRel = rel;
+          renderer.draw({ timeMs: t0 + k * dtMs, dtMs, local, others, events: ev ? [ev] : [], phase: 'racing' });
+        }
+      } else if (pose) {
         const x = num('x', 0);
         const speed = num('speed', 500);
         const frames = Math.round((targetMs - t0) / dtMs);
@@ -278,6 +365,13 @@ async function main() {
         const t0Tick = Math.floor(t0 / TICK_MS);
         while (tick < t0Tick) stepAll();
         pendingEvents = [];
+        if (Q.has('pit') && useSim) {
+          // drop the local rider at the lip of the nth pit, slowly: the real sim's RESCUE takes over
+          const ch = course.features.filter((f) => f.type === FeatureType.CHASM)[num('pit', 0)];
+          const st = riders[0].sim.state;
+          riders[0].mute = true;
+          if (ch) Object.assign(st, { x: ch.x0 - 4, y: course.heightAt(ch.x0 - 4), vx: 90, vy: 10, mode: RiderMode.GROUND, angle: Math.atan(course.slopeAt(ch.x0 - 4)) });
+        }
         const endTick = Math.floor(targetMs / TICK_MS);
         while (tick < endTick) {
           stepAll();
@@ -290,6 +384,8 @@ async function main() {
     };
 
     p.draw = () => {
+      // p5 calls draw() once after setup even with noLoop(): a frozen frame must stay as rendered
+      if (freeze) return;
       const now = performance.now();
       const dtMs = lastNow ? Math.min(100, now - lastNow) : 16.7;
       if (lastNow) frameGaps.push(now - lastNow);

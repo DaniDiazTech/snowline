@@ -76,6 +76,7 @@ export class Game {
     this.countdownShown = null;
     this.lastSendMs = 0;
     this.finalStretch = false;
+    this.lastSketchyMs = -1e9;
     this.lastTone = -1;
     /** backdrop: a bot riding behind the menus */
     this.backdrop = null;
@@ -414,6 +415,10 @@ export class Game {
       const c = this.pendingCombo;
       this.ui.comboBanked(c?.total ?? 0, c?.mult ?? 1, data.level);
       this.pendingCombo = null;
+    } else if (type === SimEvent.RESCUE_START) this.ui.announce('Fell in — lifted across, −3 s', 'bad');
+    else if (type === SimEvent.LAND && data?.sketchy && performance.now() - this.lastSketchyMs > 4000) {
+      this.lastSketchyMs = performance.now();
+      this.ui.announce('Sketchy landing', 'info');
     } else if (type === SimEvent.FINISH) this.onLocalFinish();
   }
 
