@@ -68,6 +68,9 @@ function freshPrivate() {
     landEaseT: 0, // s of fast board-to-slope easing left after a touchdown
     wobbleT: 0, // s of sketchy-landing wobble left
     rescue: null, // active pit rescue lift
+    rampLaunch: null, // pit ramp whose lip a press made on its run-up will launch from
+    spinChecked: false, // this air phase's "is there time to flip?" check was done
+    spinBlocked: false, // ...and it said no: a held button keeps the board level instead
     landSquash: 0,
     hoverOff: 0,
   };
@@ -327,9 +330,16 @@ export class RiderSim {
     const p = this._p;
     p.phys = 'air';
     p.airPhases++;
+    if (p.rampLaunch && !jumped) {
+      // Left the run-up early (e.g. off its lip naturally): the pending press becomes a coyote jump.
+      p.bufferT = SIM.COYOTE;
+    }
+    p.rampLaunch = null;
     p.jumped = jumped;
     p.coyoteT = jumped ? 0 : SIM.COYOTE;
     p.takeoffAngle = st.angle;
+    p.spinChecked = false;
+    p.spinBlocked = false;
     p.flipMinClear = Infinity;
     p.bigAirDone = false;
     st.airTime = 0;
@@ -409,7 +419,17 @@ export class RiderSim {
     const c = this.course;
     const finished = st.finishTick >= 0;
     const th = Math.atan(c.slopeAt(st.x));
-    if (p.bufferT > 0 && !finished) {
+    if (p.bufferT > 0 && !finished && !p.rampLaunch) {
+      // A press on a pit ramp's run-up launches from its lip (like a buffered press on landing).
+      const r = this._pitRampAt(st.x);
+      if (r) {
+        p.rampLaunch = r;
+        p.bufferT = 0;
+      }
+    }
+    const lipNow = p.rampLaunch && st.x >= p.rampLaunch.lipX - SIM.RAMP_LAUNCH_LEAD;
+    if ((p.bufferT > 0 || lipNow) && !finished) {
+      p.rampLaunch = null;
       this._jump(ev, p.s * Math.cos(th), p.s * Math.sin(th));
       this._air(held, ev, true);
       return;
@@ -490,7 +510,14 @@ export class RiderSim {
     // button has been held for HOLD_T (counting from the jump press on the ground) and ramps
     // in over FLIP_RAMP_T. Otherwise the release assist rolls back / finishes the flip.
     const under = Math.atan(c.slopeAt(st.x));
-    const spin = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
+    let spin = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
+    if (spin > 0 && !p.spinChecked && Math.abs(st.angVel) < 1) {
+      // About to start a flip: only if the arc stays up long enough to complete it (a blind hold
+      // into a rising hump keeps the board level instead of landing mid-flip).
+      p.spinChecked = true;
+      p.spinBlocked = this._timeToGround() < SIM.FLIP_MIN_AIR;
+    }
+    if (p.spinBlocked) spin = 0;
     if (spin > 0) {
       st.angVel = damp(st.angVel, -SIM.FLIP_RATE * spin, SIM.FLIP_EASE, dt);
     } else {
@@ -569,6 +596,28 @@ export class RiderSim {
     const vInto = -st.vx * Math.sin(under) + st.vy * Math.cos(under);
     const tipDown = st.airTime > SIM.TIP_GRACE && vInto > 0 && st.y + this._tipLift(st.angle - under) >= surfY;
     if (!ch && (st.y >= surfY || tipDown)) this._land(ev);
+  }
+
+  /** Ballistic time until the rider would touch the snow (or 3 s), ignoring drag. */
+  _timeToGround() {
+    const st = this.state;
+    const g = GRAVITY * (st.hoverT > 0 ? SIM.HOVER_GRAVITY : 1);
+    const h = 1 / 30;
+    for (let t = h; t < 3; t += h) {
+      const x = st.x + st.vx * t;
+      const y = st.y + st.vy * t + 0.5 * g * t * t;
+      if (!this.course._chasmAt(x) && y >= this._surf(x)) return t;
+    }
+    return 3;
+  }
+
+  /** Pit ramp whose run-up contains x (pit ramps have their lip exactly on a pit's near edge). */
+  _pitRampAt(x) {
+    for (const r of this._ramps) {
+      if (r.x0 > x) break;
+      if (x < r.lipX - SIM.RAMP_LAUNCH_LEAD && this.course._chasmAt(r.lipX + 1)) return r;
+    }
+    return null;
   }
 
   /**
@@ -813,6 +862,7 @@ export class RiderSim {
     p.crashT = SIM.CRASH_T;
     p.overChasm = null;
     p.kickLeft = 0;
+    p.rampLaunch = null;
     if (info.obstacle) {
       // Thrown over the obstacle: keep most of the forward speed, pop up.
       st.vx = Math.max(st.vx * SIM.CRASH_KEEP, SIM.CRASH_MIN_THROW * REF_SPEED);
@@ -944,6 +994,7 @@ export class RiderSim {
     if (!fromCrash || p.phys !== 'crashed') this._loseRun(false);
     p.kickLeft = 0;
     p.overChasm = null;
+    p.rampLaunch = null;
     const toX = ch.x1 + SIM.RESCUE_LAND_OFFSET;
     const toY = c.heightAt(toX);
     const top = Math.min(ch.y0, ch.y1) - SIM.RESCUE_ARC_H;

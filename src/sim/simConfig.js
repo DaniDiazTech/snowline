@@ -23,6 +23,8 @@ export const SIM = Object.freeze({
   JUMP_BUFFER: 0.15, // s a press is remembered before touching down
   COYOTE: 0.12, // s after rolling off an edge during which a press still jumps
   RAMP_ZONE_AFTER_LIP: 50, // px after a ramp lip where a jump still gets RAMP_POP
+  RAMP_LAUNCH_LEAD: 6, // px: a press on a pit ramp's run-up launches this close to the lip
+  FLIP_MIN_AIR: 0.62, // s: a held flip only starts if the arc stays up at least this long (no mid-flip touchdowns on short hops)
 
   /* ---- air ---- */
   // Ground resistance k·v² = aero (≈45%) + snow friction (≈55%). In the air only the aero part acts,

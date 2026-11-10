@@ -73,7 +73,7 @@ export const COURSE = Object.freeze({
   KICKER_H: [45, 65], // standalone ramps on open slopes
   LANDING_SLOPE: [0.45, 0.55], // downslope after a pit that receives the jump arc (≈ 24-29°)
   LANDING_LEN: 800, // px
-  PIT_DOUBLE_PAD: [600, 700], // landing zone + the second ramp's run-up between the two pits of a double pit
+  PIT_DOUBLE_PAD: [1000, 1150], // beyond the first pit's landing hill, + the second ramp's run-up
   PIT_DEPTH: 560, // pit floor below the lower lip
   ROCK_R: [14, 30],
   // Obstacle kinds per biome (weights) and box sizes (px). Boxes are {x (centre), w, h}.
