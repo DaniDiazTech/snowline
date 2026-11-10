@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Snowline — render harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+      canvas { display: block; }
+      #perf {
+        position: fixed; left: 8px; top: 8px; z-index: 5; display: none;
+        font: 11px/1.35 ui-monospace, Menlo, monospace; color: #fff;
+        background: rgba(0, 0, 0, 0.45); padding: 6px 8px; border-radius: 6px; white-space: pre;
+      }
+    </style>
+    <script src="../lib/p5.min.js"></script>
+  </head>
+  <body>
+    <div id="perf"></div>
+    <script type="module" src="./harness.js"></script>
+  </body>
+</html>

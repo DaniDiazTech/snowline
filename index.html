@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" data-tone="day">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <title>Snowline</title>
+    <meta name="description" content="A downhill snowboard race with friends. Share a code, pick a scarf, race down the mountain — in your browser." />
+    <meta name="theme-color" content="#cfe0ec" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta property="og:title" content="Snowline" />
+    <meta property="og:description" content="A downhill race with friends." />
+    <meta property="og:image" content="assets/og.png" />
+    <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300;1,9..144,400&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- p5.js world canvas (full viewport, behind everything) -->
+    <div id="stage" aria-hidden="true"></div>
+
+    <!-- DOM UI: screens, HUD and overlays are built by src/ui/UI.js -->
+    <main id="ui" aria-live="off"></main>
+
+    <noscript>Snowline needs JavaScript to run.</noscript>
+
+    <!-- Libraries (vendored, so the game also works offline) -->
+    <script src="lib/p5.min.js"></script>
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>

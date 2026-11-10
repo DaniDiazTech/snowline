@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" data-tone="day">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <title>Snowline · UI harness</title>
+    <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300;1,9..144,400&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="../style.css" />
+    <style>
+      /* Static stand-in for the p5 scene so screens can be judged in context. */
+      #stage svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      .dev-bar { position: fixed; left: 8px; bottom: 8px; z-index: 50; display: flex; gap: 4px; flex-wrap: wrap; font: 12px system-ui; opacity: 0.25; transition: opacity .2s; }
+      .dev-bar:hover { opacity: 1; }
+      .dev-bar a { padding: 3px 7px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; text-decoration: none; }
+      html.shot .dev-bar { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="stage" aria-hidden="true"></div>
+    <main id="ui"></main>
+    <nav class="dev-bar" id="dev-bar"></nav>
+    <script type="module" src="ui-dev.js"></script>
+  </body>
+</html>

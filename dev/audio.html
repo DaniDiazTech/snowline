@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snowline audio test</title>
+<style>
+  body { font: 14px system-ui, sans-serif; background: #1d2a3a; color: #e8eef5; margin: 0; padding: 16px; max-width: 860px; }
+  h1 { font-size: 18px; } h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: #8fb0d0; margin: 18px 0 6px; }
+  button { background: #2f4a68; color: #fff; border: 0; border-radius: 6px; padding: 7px 12px; margin: 2px; cursor: pointer; }
+  button:hover { background: #3f6288; } button.on { background: #c0643a; }
+  label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; }
+  input[type=range] { width: 180px; } #log { color: #8fb0d0; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Snowline audio test</h1>
+<p><button id="unlock">Unlock audio</button> <button id="mute">Mute</button> <span id="state">locked</span></p>
+
+<h2>Music</h2><div id="music"></div>
+<h2>Sim events</h2><div id="events"></div>
+<h2>UI</h2><div id="ui"></div>
+<h2>Live view (update() every frame)</h2>
+<div>
+  <label>speed <input id="speed" type="range" min="0" max="1800" value="0"><output></output></label>
+  <label>boostLevel <input id="boostLevel" type="range" min="0" max="3" step="1" value="0"><output></output></label>
+  <label>night <input id="night" type="range" min="0" max="1" step="0.01" value="0"><output></output></label>
+  <label>weatherAmt <input id="weatherAmt" type="range" min="0" max="1" step="0.01" value="0"><output></output></label>
+  <label>mode <select id="mode"><option>idle</option><option selected>ground</option><option>air</option><option>grind</option><option>crashed</option><option>finished</option></select></label>
+  <label>weather <select id="weather"><option>clear</option><option>snow</option><option>storm</option><option>fog</option></select></label>
+  <button id="flash">Lightning flash</button>
+  <label><input type="checkbox" id="loop" checked> run update loop</label>
+</div>
+<div id="log"></div>
+
+<script type="module">
+import { AudioEngine } from '../src/audio/AudioEngine.js';
+
+const engine = new AudioEngine();
+window.AudioEngine = AudioEngine;
+window.engine = engine;
+window.errors = [];
+addEventListener('error', (e) => window.errors.push(String(e.message)));
+addEventListener('unhandledrejection', (e) => window.errors.push(String(e.reason)));
+
+const $ = (id) => document.getElementById(id);
+const mk = (parent, label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { engine.unlock(); fn(); }; $(parent).append(b); return b; };
+
+$('unlock').onclick = () => { engine.unlock(); $('state').textContent = engine.ctx ? engine.ctx.state : 'no audio'; };
+$('mute').onclick = () => { engine.setMuted(!engine.muted); $('mute').textContent = engine.muted ? 'Unmute' : 'Mute'; };
+
+for (const m of ['menu', 'race', 'results']) mk('music', 'startMusic ' + m, () => engine.startMusic(m));
+mk('music', 'stopMusic', () => engine.stopMusic());
+
+const EVENTS = {
+  jump: {}, 'land (clean, soft)': ['land', { clean: true, impact: 0.2 }], 'land (hard)': ['land', { clean: false, impact: 0.95 }],
+  trick: { name: 'backflip', label: 'Backflip', points: 100 }, combo: { points: 500, mult: 3, total: 900, tricks: ['backflip'] },
+  'boost 1': ['boost', { level: 1, duration: 3 }], 'boost 2': ['boost', { level: 2, duration: 4 }], 'boost 3': ['boost', { level: 3, duration: 5 }],
+  grindStart: { featureId: 1, kind: 'bunting' }, grindEnd: { featureId: 1, length: 300 }, rockSmash: { featureId: 2, x: 0, y: 0 },
+  'pickup coin': ['pickup', { kind: 'coin' }], 'pickup feather': ['pickup', { kind: 'feather' }], 'pickup magnet': ['pickup', { kind: 'magnet' }],
+  crash: { cause: 'rock', x: 0, y: 0 }, respawn: { x: 0, y: 0 }, chasmClear: { featureId: 3 }, finish: { tick: 100, timeMs: 1666 },
+};
+for (const [label, v] of Object.entries(EVENTS)) {
+  const [type, data] = Array.isArray(v) ? v : [label, v];
+  mk('events', label, () => engine.onSimEvent({ type, data }));
+}
+mk('events', 'trick x5 chain', () => { for (let i = 0; i < 5; i++) setTimeout(() => engine.onSimEvent({ type: 'trick', data: {} }), i * 180); });
+mk('events', 'coin x6 chain', () => { for (let i = 0; i < 6; i++) setTimeout(() => engine.onSimEvent({ type: 'pickup', data: { kind: 'coin' } }), i * 120); });
+for (const n of ['click', 'join', 'leave', 'countdown', 'go', 'finish', 'win']) mk('ui', n, () => engine.ui(n));
+mk('ui', '3-2-1-go', () => { [0, 1, 2].forEach((i) => setTimeout(() => engine.ui('countdown'), i * 1000)); setTimeout(() => engine.ui('go'), 3000); });
+
+for (const el of document.querySelectorAll('input[type=range]')) {
+  const out = el.parentElement.querySelector('output');
+  const sync = () => (out.textContent = el.value);
+  el.oninput = sync; sync();
+}
+let flashUntil = 0;
+$('flash').onclick = () => { engine.unlock(); flashUntil = performance.now() + 250; };
+function view() {
+  return {
+    speed: +$('speed').value, mode: $('mode').value, boostLevel: +$('boostLevel').value, night: +$('night').value,
+    weather: $('weather').value, weatherAmt: +$('weatherAmt').value, flash: performance.now() < flashUntil ? 1 : 0,
+  };
+}
+window.currentView = view;
+function frame() {
+  if ($('loop').checked) engine.update(view());
+  $('state').textContent = engine.ctx ? engine.ctx.state : 'locked';
+  requestAnimationFrame(frame);
+}
+frame();
+
+/* ---- offline rendering helpers (used by snowline-tests/audio) ---- */
+function stats(buf) {
+  let peak = 0, sum = 0, n = 0;
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i++) { const a = Math.abs(d[i]); if (a > peak) peak = a; sum += d[i] * d[i]; n++; }
+  }
+  return { peak, rms: Math.sqrt(sum / n), rmsDb: 20 * Math.log10(Math.sqrt(sum / n) + 1e-9), peakDb: 20 * Math.log10(peak + 1e-9) };
+}
+/** setup(engine) runs at t=0 on the offline engine. */
+window.renderOffline = async (seconds, setup) => {
+  const sr = 44100;
+  const ctx = new OfflineAudioContext(2, sr * seconds, sr);
+  const e = AudioEngine.forContext(ctx);
+  setup(e);
+  e.prepareOffline(seconds);
+  return stats(await ctx.startRendering());
+};
+window.renderMood = (mood, seconds = 10, view = null) => window.renderOffline(seconds, (e) => { e.startMusic(mood); if (view) e.update(view); });
+window.renderEvent = (type, data, seconds = 3) => window.renderOffline(seconds, (e) => e.onSimEvent({ type, data }));
+window.renderUi = (name, seconds = 3) => window.renderOffline(seconds, (e) => e.ui(name));
+window.renderView = (view, seconds = 4) => window.renderOffline(seconds, (e) => e.update(view));
+</script>
+</body>
+</html>

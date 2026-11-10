@@ -1,0 +1,843 @@
+/**
+ * Deterministic simulation of ONE rider on a Course. One `step()` = one tick (TICK_DT).
+ *
+ * Physics model
+ *  - GROUND: the rider is a point glued to the surface with a signed speed `s` along the
+ *    tangent: a = g·sinθ − k·s² (+ boost push, + skate push below MIN_SPEED). Scarf and
+ *    boost divide the drag by M², which raises the cruising (terminal) speed by M.
+ *    Each tick a short ballistic look-ahead decides whether the ground falls away faster
+ *    than a free arc (crests, ramp lips, chasm edges) — then the rider becomes airborne.
+ *    The look-ahead needs the surface to curve ≈30% harder than gravity, so gentle bumps
+ *    never jitter between ground and air.
+ *  - AIR: ballistic with light quadratic drag. Holding the button spins a backflip
+ *    (counter-clockwise, angle decreases) with a quick ease-in; releasing damps the spin
+ *    and levels the board only a little toward the slope below.
+ *  - GRIND: like ground but on a grind line (bunting / roof / ice); mild speed gain.
+ *  - CRASHED: tumble and slide to a stop, then respawn at low speed with invulnerability.
+ *
+ * The internal physics mode (`_p.phys`) is separate from the reported `state.mode`
+ * (which adds IDLE / FINISHED / CRASHED precedence).
+ *
+ * `state._sim` (non-enumerable) points back to this sim so a Bot can clone it for planning.
+ */
+import { RiderMode, SimEvent, FeatureType, GrindKind, PickupKind, TICK_DT, TICK_MS } from '../contracts.js';
+import { clamp, damp, smoothstep, wrapAngle, TAU } from '../math/utils.js';
+import { SIM, TRICKS, GRAVITY, JUMP_VY, DRAG_K, REF_SPEED, RAMP_POP, BODY_CENTER, RIDER_HEIGHT, terminalSpeed } from './simConfig.js';
+
+const dt = TICK_DT;
+const GRIND_LABELS = { [GrindKind.BUNTING]: 'Bunting Grind', [GrindKind.ROOF]: 'Roof Grind', [GrindKind.ICE]: 'Ice Slide' };
+const FLIP_NAMES = ['', 'backflip', 'doubleBackflip', 'tripleBackflip'];
+
+function freshPrivate() {
+  return {
+    phys: 'ground', // 'ground' | 'air' | 'grind' | 'crashed'
+    s: 0, // speed along the surface / line (ground, grind, crash slide)
+    prevHeld: false,
+    bufferT: 0,
+    coyoteT: 0,
+    jumped: false, // current air phase started with a jump
+    takeoffAngle: 0,
+    flipMinClear: Infinity,
+    bigAirDone: false,
+    overChasm: null,
+    grind: null,
+    grindDist: 0,
+    grindLen: 0,
+    grindCooldownId: -1,
+    grindCooldownT: 0,
+    bounceId: -1,
+    bounceT: 0,
+    crashT: 0,
+    crashCause: '',
+    crashChasm: null,
+    respawnMinX: -Infinity,
+    invulnT: 0,
+    boostDur: 0,
+    landSquash: 0,
+    hoverOff: 0,
+  };
+}
+
+function freshStats() {
+  return { score: 0, bestCombo: 0, flips: 0, grindPx: 0, crashes: 0, coins: 0, topSpeed: 0 };
+}
+
+export class RiderSim {
+  /** @param {import('../contracts.js').Course} course */
+  constructor(course) {
+    this.course = course;
+    /** @type {Set<number>} */
+    this.consumed = new Set();
+    this._p = freshPrivate();
+    const x = course.startX;
+    /** @type {import('../contracts.js').RiderState} */
+    this.state = {
+      tick: 0,
+      x,
+      y: course.heightAt(x),
+      vx: 0,
+      vy: 0,
+      angle: Math.atan(course.slopeAt(x)),
+      angVel: 0,
+      mode: RiderMode.IDLE,
+      speed: 0,
+      crouch: 0.2,
+      scarf: 0,
+      boostT: 0,
+      boostLevel: 0,
+      shield: false,
+      hoverT: 0,
+      magnetT: 0,
+      airTime: 0,
+      flips: 0,
+      combo: { points: 0, mult: 0, tricks: [] },
+      progress: 0,
+      finishTick: -1,
+      stats: freshStats(),
+    };
+    Object.defineProperty(this.state, '_sim', { value: this, enumerable: false, writable: true, configurable: true });
+    this._ramps = course.features.filter((f) => f.type === FeatureType.RAMP);
+  }
+
+  /** IDLE → GROUND at GO. */
+  start() {
+    if (this.state.mode !== RiderMode.IDLE) return;
+    this.state.mode = RiderMode.GROUND;
+    this._p.phys = 'ground';
+    this._p.s = SIM.START_SPEED;
+  }
+
+  /** Copies the complete simulation state of another RiderSim on the same course (used by bots to plan). */
+  copyFrom(other) {
+    const a = this.state;
+    const b = other.state;
+    for (const k in b) {
+      if (k === 'combo' || k === 'stats') continue;
+      a[k] = b[k];
+    }
+    a.combo.points = b.combo.points;
+    a.combo.mult = b.combo.mult;
+    a.combo.tricks = b.combo.tricks.slice();
+    Object.assign(a.stats, b.stats);
+    Object.assign(this._p, other._p);
+    this.consumed.clear();
+    for (const id of other.consumed) this.consumed.add(id);
+  }
+
+  /**
+   * Advances exactly one tick.
+   * @param {import('../contracts.js').RiderInput} input
+   * @returns {import('../contracts.js').SimEventRecord[]}
+   */
+  step(input) {
+    const ev = [];
+    const st = this.state;
+    const p = this._p;
+    if (st.mode === RiderMode.IDLE) return ev;
+    st.tick++;
+    const finished = st.finishTick >= 0;
+    const held = !finished && !!(input && input.held);
+    const pressed = held && !p.prevHeld;
+    p.prevHeld = held;
+    p.bufferT = pressed ? SIM.JUMP_BUFFER : Math.max(0, p.bufferT - dt);
+
+    this._timers();
+    switch (p.phys) {
+      case 'ground':
+        this._ground(held, ev);
+        break;
+      case 'air':
+        this._air(held, ev);
+        break;
+      case 'grind':
+        this._grind(held, ev);
+        break;
+      case 'crashed':
+        this._crashed(ev);
+        break;
+    }
+    if (p.phys !== 'crashed') this._pickups(ev);
+
+    const c = this.course;
+    if (st.x > c.maxX - 5) {
+      st.x = c.maxX - 5;
+      st.y = c.heightAt(st.x);
+      p.s = 0;
+      st.vx = 0;
+      st.vy = 0;
+    }
+    if (st.finishTick < 0 && st.x >= c.finishX) {
+      st.finishTick = st.tick;
+      ev.push({ type: SimEvent.FINISH, data: { tick: st.tick, timeMs: st.tick * TICK_MS } });
+    }
+    this._derive(held);
+    return ev;
+  }
+
+  /* ------------------------------------------------------------ helpers */
+
+  _surf(x) {
+    return this.course.heightAt(x) - this._p.hoverOff;
+  }
+
+  _mult() {
+    const st = this.state;
+    let m = 1 + SIM.SCARF_SPEED_BONUS * st.scarf;
+    if (st.boostT > 0 && st.boostLevel > 0) m *= 1 + SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac();
+    return m;
+  }
+
+  _boostFrac() {
+    const st = this.state;
+    if (st.boostT <= 0) return 0;
+    return smoothstep(0, this._p.boostDur * (1 - SIM.BOOST_FULL_FRAC), st.boostT);
+  }
+
+  _timers() {
+    const st = this.state;
+    const p = this._p;
+    if (st.boostT > 0) {
+      st.boostT = Math.max(0, st.boostT - dt);
+      if (st.boostT === 0) st.boostLevel = 0;
+    }
+    st.shield = st.boostT > 0 && st.boostT > p.boostDur * (1 - SIM.SHIELD_FRAC);
+    st.hoverT = Math.max(0, st.hoverT - dt);
+    st.magnetT = Math.max(0, st.magnetT - dt);
+    p.invulnT = Math.max(0, p.invulnT - dt);
+    p.grindCooldownT = Math.max(0, p.grindCooldownT - dt);
+    p.bounceT = Math.max(0, p.bounceT - dt);
+    p.landSquash = Math.max(0, p.landSquash - 3 * dt);
+    st.scarf = Math.max(0, st.scarf - SIM.SCARF_DECAY * dt);
+    p.hoverOff = damp(p.hoverOff, st.hoverT > 0 ? SIM.HOVER_HEIGHT : 0, 6, dt);
+    if (p.hoverOff < 0.01) p.hoverOff = 0;
+  }
+
+  _addTrick(ev, name, label, points) {
+    const cb = this.state.combo;
+    cb.points += points;
+    cb.tricks.push(name);
+    cb.mult = cb.tricks.length;
+    ev.push({ type: SimEvent.TRICK, data: { name, label, points } });
+  }
+
+  _bank(ev) {
+    const st = this.state;
+    const cb = st.combo;
+    if (cb.tricks.length === 0) {
+      if (cb.points) st.stats.score += cb.points;
+      cb.points = 0;
+      return;
+    }
+    const mult = cb.tricks.length;
+    const total = cb.points * mult;
+    ev.push({ type: SimEvent.COMBO, data: { points: cb.points, mult, total, tricks: cb.tricks.slice() } });
+    st.stats.score += total;
+    st.stats.bestCombo = Math.max(st.stats.bestCombo, total);
+    st.scarf = Math.min(1, st.scarf + Math.min(SIM.SCARF_MAX_GAIN, total * SIM.SCARF_PER_POINT));
+    let level = 0;
+    SIM.BOOST_TIERS.forEach((t, i) => {
+      if (total >= t.min) level = i + 1;
+    });
+    if (level > 0) {
+      const dur = SIM.BOOST_TIERS[level - 1].duration;
+      let t = dur;
+      if (st.boostT > 0) {
+        // Re-banking during a boost: extends it (by a fraction of the overlap). A higher tier
+        // upgrades it; a lower tier keeps the current tier only while it still has > 1 s left.
+        if (level < st.boostLevel && st.boostT > 1) level = st.boostLevel;
+        t = Math.min(SIM.BOOST_MAX_T, Math.max(st.boostT, dur) + SIM.BOOST_EXTEND * Math.min(st.boostT, dur));
+      }
+      st.boostT = t;
+      st.boostLevel = level;
+      this._p.boostDur = t;
+      st.shield = true;
+      ev.push({ type: SimEvent.BOOST, data: { level, duration: t } });
+    }
+    cb.points = 0;
+    cb.mult = 0;
+    cb.tricks = [];
+  }
+
+  _startAir(jumped) {
+    const st = this.state;
+    const p = this._p;
+    p.phys = 'air';
+    p.jumped = jumped;
+    p.coyoteT = jumped ? 0 : SIM.COYOTE;
+    p.takeoffAngle = st.angle;
+    p.flipMinClear = Infinity;
+    p.bigAirDone = false;
+    st.airTime = 0;
+    st.flips = 0;
+  }
+
+  _onRamp(x) {
+    for (const r of this._ramps) {
+      if (r.x0 > x) break;
+      if (x <= r.lipX + SIM.RAMP_ZONE_AFTER_LIP) return true;
+    }
+    return false;
+  }
+
+  _jump(ev, vx, vy) {
+    const st = this.state;
+    const p = this._p;
+    p.bufferT = 0;
+    st.vx = vx;
+    st.vy = vy - JUMP_VY - (this._onRamp(st.x) ? RAMP_POP : 0);
+    this._startAir(true);
+    ev.push({ type: SimEvent.JUMP, data: {} });
+  }
+
+  _iceAt(x) {
+    for (const f of this.course.featuresIn(x, x)) {
+      if (f.type === FeatureType.GRIND && f.kind === GrindKind.ICE && x >= f.x0 && x < f.x1 - 2) return f;
+    }
+    return null;
+  }
+
+  _startGrind(ev, g) {
+    const st = this.state;
+    const p = this._p;
+    p.phys = 'grind';
+    p.grind = g;
+    p.grindDist = 0;
+    p.grindLen = 0;
+    st.airTime = 0;
+    st.flips = 0;
+    st.angVel = 0;
+    ev.push({ type: SimEvent.GRIND_START, data: { featureId: g.id, kind: g.kind } });
+    this._addTrick(ev, 'grind', GRIND_LABELS[g.kind] || 'Grind', TRICKS.GRIND);
+  }
+
+  _endGrind(ev) {
+    const p = this._p;
+    if (!p.grind) return;
+    ev.push({ type: SimEvent.GRIND_END, data: { featureId: p.grind.id, length: Math.round(p.grindLen) } });
+    p.grindCooldownId = p.grind.id;
+    p.grindCooldownT = SIM.GRIND_REJUMP_COOLDOWN;
+    p.grind = null;
+  }
+
+  _lineSlope(g, x) {
+    const c = this.course;
+    const a = Math.max(g.x0, x - 2);
+    const b = Math.min(g.x1, x + 2);
+    if (b - a < 1e-6) return 0;
+    return (c.grindY(g, b) - c.grindY(g, a)) / (b - a);
+  }
+
+  /** True if a free ballistic arc from here ends above the surface (the ground falls away). */
+  _fallsAway(x, y, vx, vy) {
+    const t = SIM.LEAVE_LOOKAHEAD_TICKS * dt;
+    const g = GRAVITY * (this.state.hoverT > 0 ? SIM.HOVER_GRAVITY : 1);
+    const bx = x + vx * t;
+    const by = y + vy * t + 0.5 * g * t * t;
+    return by < this._surf(bx) - SIM.LEAVE_EPS;
+  }
+
+  /* ------------------------------------------------------------ ground */
+
+  _ground(held, ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const finished = st.finishTick >= 0;
+    const th = Math.atan(c.slopeAt(st.x));
+    if (p.bufferT > 0 && !finished) {
+      this._jump(ev, p.s * Math.cos(th), p.s * Math.sin(th));
+      this._air(held, ev, true);
+      return;
+    }
+    const M = this._mult();
+    let a = GRAVITY * Math.sin(th) - (DRAG_K / (M * M)) * p.s * Math.abs(p.s);
+    if (st.boostT > 0 && p.s < M * Math.max(REF_SPEED * 0.8, terminalSpeed(Math.tan(th)))) a += SIM.BOOST_PUSH * this._boostFrac();
+    if (finished) a -= p.s > 0 ? SIM.FINISH_BRAKE : 0;
+    else if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
+    p.s += a * dt;
+    p.s = finished ? Math.max(0, p.s) : clamp(p.s, 20, SIM.MAX_GROUND_SPEED);
+    const vx = p.s * Math.cos(th);
+    const vy = p.s * Math.sin(th);
+    if (p.s > 0 && this._fallsAway(st.x, st.y, vx, vy)) {
+      st.vx = vx;
+      st.vy = vy;
+      this._startAir(false);
+      this._air(held, ev, true);
+      return;
+    }
+    const px = st.x;
+    const py = st.y;
+    st.x += vx * dt;
+    st.y = this._surf(st.x);
+    const th2 = Math.atan(c.slopeAt(st.x));
+    st.vx = p.s * Math.cos(th2);
+    st.vy = p.s * Math.sin(th2);
+    st.angle = damp(st.angle, th2, SIM.GROUND_ANGLE_SHARPNESS, dt);
+    st.angVel = 0;
+    if (!finished) {
+      const ice = this._iceAt(st.x);
+      if (ice) {
+        this._startGrind(ev, ice);
+        return;
+      }
+      this._obstacles(px, py, ev, true);
+      if (p.phys === 'ground') this._bank(ev);
+    }
+  }
+
+  /* ------------------------------------------------------------ air */
+
+  _air(held, ev, firstTick = false) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const finished = st.finishTick >= 0;
+    if (!firstTick && p.coyoteT > 0) {
+      p.coyoteT -= dt;
+      if (p.bufferT > 0 && !p.jumped && !finished) this._jump(ev, st.vx, st.vy);
+    }
+    const hover = st.hoverT > 0;
+    st.vy += GRAVITY * (hover ? SIM.HOVER_GRAVITY : 1) * dt;
+    const M = this._mult();
+    const sp = Math.hypot(st.vx, st.vy);
+    const f = Math.max(0, 1 - ((DRAG_K * SIM.AIR_DRAG_MULT) / (M * M)) * sp * dt);
+    st.vx *= f;
+    st.vy *= f;
+    if (st.boostT > 0 && sp > 1 && sp < M * REF_SPEED) {
+      // Boost keeps pushing in the air, so style jumps never cost boosted speed.
+      const push = (SIM.BOOST_PUSH * this._boostFrac() * dt) / sp;
+      st.vx += st.vx * push;
+      st.vy += st.vy * push;
+    }
+    const px = st.x;
+    const py = st.y;
+    st.x += st.vx * dt;
+    st.y += st.vy * dt;
+    st.airTime += dt;
+
+    // Rotation.
+    const under = Math.atan(c.slopeAt(st.x));
+    if (held) {
+      st.angVel = damp(st.angVel, -SIM.FLIP_RATE, SIM.FLIP_EASE, dt);
+    } else {
+      st.angVel = damp(st.angVel, 0, SIM.RELEASE_DAMP, dt);
+      st.angVel += (hover ? SIM.HOVER_LEVEL : SIM.AUTO_LEVEL) * wrapAngle(under - st.angle) * dt;
+    }
+    st.angle += st.angVel * dt;
+
+    // Head clearance (proximity flips, head-first crashes).
+    const rel = wrapAngle(st.angle - under);
+    if (Math.cos(rel) < 0.2) {
+      const hx = st.x + RIDER_HEIGHT * Math.sin(st.angle);
+      const hy = st.y - RIDER_HEIGHT * Math.cos(st.angle);
+      if (!c._chasmAt(hx)) {
+        const clear = this._surf(hx) - hy;
+        p.flipMinClear = Math.min(p.flipMinClear, clear);
+        if (clear < -2 && !hover && !finished) {
+          this._crash('landing', ev);
+          return;
+        }
+      }
+    }
+
+    // Flips.
+    const n = Math.floor((p.takeoffAngle - st.angle + SIM.FLIP_COUNT_TOL) / TAU);
+    while (n > st.flips && !finished) {
+      st.flips++;
+      st.stats.flips++;
+      const k = st.flips;
+      const bonus = TRICKS.FLIP_BONUS[k] ?? TRICKS.FLIP_BONUS[TRICKS.FLIP_BONUS.length - 1] + 150 * (k - TRICKS.FLIP_BONUS.length + 1);
+      this._addTrick(ev, FLIP_NAMES[k] || 'multiBackflip', TRICKS.FLIP_LABELS[k] || `${k}× Backflip`, TRICKS.BACKFLIP + bonus);
+      if (p.flipMinClear < SIM.PROXIMITY_DIST) this._addTrick(ev, 'proximity', 'Proximity Flip', TRICKS.PROXIMITY);
+      p.flipMinClear = Infinity;
+    }
+    if (!p.bigAirDone && st.airTime > SIM.BIG_AIR_T && !finished) {
+      p.bigAirDone = true;
+      this._addTrick(ev, 'bigAir', 'Big Air', TRICKS.BIG_AIR);
+    }
+
+    // Chasms.
+    const ch = c._chasmAt(st.x);
+    if (ch) {
+      p.overChasm = ch;
+      const lip = ch.y0 + ((ch.y1 - ch.y0) * (st.x - ch.x0)) / (ch.x1 - ch.x0);
+      if (st.y > lip + SIM.CHASM_FALL_DEPTH) {
+        this._crash('chasm', ev, { chasm: ch });
+        return;
+      }
+    } else if (p.overChasm) {
+      const oc = p.overChasm;
+      p.overChasm = null;
+      if (st.x >= oc.x1) {
+        const ground = this._surf(st.x);
+        if (st.y > ground + SIM.CHASM_POP_TOL) {
+          // Slammed into the far wall.
+          st.x = oc.x1 - 2;
+          st.vx = 0;
+          this._crash('chasm', ev, { chasm: oc });
+          return;
+        }
+        if (st.y > ground) st.y = ground;
+        if (!finished) {
+          ev.push({ type: SimEvent.CHASM_CLEAR, data: { featureId: oc.id } });
+          this._addTrick(ev, 'chasmJump', 'Chasm Jump', TRICKS.CHASM);
+        }
+      }
+    }
+
+    if (this._catchGrind(px, py, ev)) return;
+    if (!finished) {
+      this._obstacles(px, py, ev, false);
+      if (p.phys !== 'air') return;
+    }
+    if (!ch && st.y >= this._surf(st.x)) this._land(ev);
+  }
+
+  _land(ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const finished = st.finishTick >= 0;
+    const th = Math.atan(c.slopeAt(st.x));
+    const rel = wrapAngle(st.angle - th);
+    const vt = st.vx * Math.cos(th) + st.vy * Math.sin(th);
+    const vn = -st.vx * Math.sin(th) + st.vy * Math.cos(th);
+    const impact = clamp(vn / SIM.IMPACT_REF, 0, 1);
+    st.y = this._surf(st.x);
+    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= SIM.LAND_CLEAN_ANGLE;
+    if (!clean) {
+      ev.push({ type: SimEvent.LAND, data: { clean: false, impact } });
+      this._crash('landing', ev);
+      return;
+    }
+    const r = st.hoverT > 0 ? 0 : rel / SIM.LAND_CLEAN_ANGLE;
+    const loss = SIM.LAND_LOSS * impact + SIM.SLOPPY_LOSS * r * r;
+    p.s = Math.max(60, vt * (1 - loss));
+    st.angle = th + (st.hoverT > 0 ? 0 : rel);
+    st.angVel = 0;
+    p.landSquash = Math.max(p.landSquash, impact + 0.2);
+    if (p.jumped || st.airTime >= SIM.MICRO_AIR || st.combo.tricks.length) {
+      ev.push({ type: SimEvent.LAND, data: { clean: true, impact } });
+    }
+    st.airTime = 0;
+    st.flips = 0;
+    p.overChasm = null;
+    const ice = finished ? null : this._iceAt(st.x);
+    if (ice) {
+      this._startGrind(ev, ice);
+      return;
+    }
+    p.phys = 'ground';
+    st.vx = p.s * Math.cos(th);
+    st.vy = p.s * Math.sin(th);
+    if (!finished) this._bank(ev);
+  }
+
+  _catchGrind(px, py, ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const x = st.x;
+    const list = c.featuresIn(Math.min(px, x), Math.max(px, x));
+    for (const g of list) {
+      if (g.type !== FeatureType.GRIND || g.kind === GrindKind.ICE) continue;
+      if (x < g.x0 || x > g.x1) continue;
+      if (g.id === p.grindCooldownId && p.grindCooldownT > 0) continue;
+      const ly = c.grindY(g, x);
+      const lyPrev = c.grindY(g, clamp(px, g.x0, g.x1));
+      if (!(py <= lyPrev + 1 && st.y >= ly - SIM.GRIND_CATCH_TOL)) continue;
+      const ls = this._lineSlope(g, x);
+      if (st.vy - ls * st.vx <= 0) continue;
+      const thL = Math.atan(ls);
+      const rel = wrapAngle(st.angle - thL);
+      if (Math.abs(rel) > SIM.GRIND_CATCH_ANGLE && st.hoverT <= 0) continue;
+      p.s = Math.max(120, st.vx * Math.cos(thL) + st.vy * Math.sin(thL));
+      st.y = ly;
+      st.angle = thL + rel * 0.5;
+      p.overChasm = null;
+      this._startGrind(ev, g);
+      return true;
+    }
+    return false;
+  }
+
+  /* ------------------------------------------------------------ grind */
+
+  _grind(held, ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    const g = p.grind;
+    const finished = st.finishTick >= 0;
+    const ice = g.kind === GrindKind.ICE;
+    const ls = ice ? c.slopeAt(st.x) : this._lineSlope(g, st.x);
+    const th = Math.atan(ls);
+    if (p.bufferT > 0 && !finished) {
+      this._endGrind(ev);
+      this._jump(ev, p.s * Math.cos(th), p.s * Math.sin(th));
+      this._air(held, ev, true);
+      return;
+    }
+    const M = this._mult();
+    let a = GRAVITY * Math.sin(th) - ((DRAG_K * (ice ? SIM.ICE_DRAG_MULT : SIM.GRIND_DRAG_MULT)) / (M * M)) * p.s * p.s;
+    if (p.s < 1.15 * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
+    if (st.boostT > 0 && p.s < M * REF_SPEED) a += SIM.BOOST_PUSH * this._boostFrac();
+    if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
+    p.s = clamp(p.s + a * dt, 40, SIM.MAX_GROUND_SPEED);
+    const dx = p.s * Math.cos(th) * dt;
+    const nx = st.x + dx;
+    st.stats.grindPx += dx;
+    p.grindLen += dx;
+    p.grindDist += dx;
+    while (p.grindDist >= SIM.GRIND_POINTS_EVERY) {
+      p.grindDist -= SIM.GRIND_POINTS_EVERY;
+      if (!finished) st.combo.points += SIM.GRIND_POINTS;
+    }
+    if (nx >= g.x1) {
+      st.x = nx;
+      this._endGrind(ev);
+      if (ice) {
+        st.y = this._surf(st.x);
+        p.phys = 'ground';
+        const th2 = Math.atan(c.slopeAt(st.x));
+        st.vx = p.s * Math.cos(th2);
+        st.vy = p.s * Math.sin(th2);
+        if (!finished) this._bank(ev);
+      } else {
+        st.y = c.grindY(g, g.x1);
+        st.vx = p.s * Math.cos(th);
+        st.vy = p.s * Math.sin(th);
+        this._startAir(false);
+      }
+      return;
+    }
+    st.x = nx;
+    st.y = ice ? this._surf(nx) : c.grindY(g, nx);
+    const th2 = Math.atan(ice ? c.slopeAt(nx) : this._lineSlope(g, nx));
+    st.vx = p.s * Math.cos(th2);
+    st.vy = p.s * Math.sin(th2);
+    st.angle = damp(st.angle, th2, SIM.GROUND_ANGLE_SHARPNESS, dt);
+    st.angVel = 0;
+  }
+
+  /* ------------------------------------------------------------ obstacles */
+
+  _obstacles(px, py, ev, onGround) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    if (p.invulnT > 0 || st.hoverT > 0) return;
+    const list = c.featuresIn(Math.min(px, st.x) - 40, Math.max(px, st.x) + 40);
+    for (const f of list) {
+      if (f.type !== FeatureType.ROCK && f.type !== FeatureType.CAMPFIRE) continue;
+      if (this.consumed.has(f.id)) continue;
+      const isRock = f.type === FeatureType.ROCK;
+      const r = f.size;
+      const cy = c.heightAt(f.x) - r * (isRock ? SIM.ROCK_CENTER : 0.5);
+      let hit = false;
+      let bounce = false;
+      for (let k = 0; k < 2; k++) {
+        const x = k === 0 ? (px + st.x) / 2 : st.x;
+        const y = k === 0 ? (py + st.y) / 2 : st.y;
+        const dx = x - f.x;
+        const dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (isRock && !onGround && st.vy > 0 && y < cy && d2 < (r * SIM.ROCK_TOP_ZONE) ** 2) {
+          if (!(p.bounceId === f.id && p.bounceT > 0)) bounce = true;
+          break;
+        }
+        if (d2 < (r * (isRock ? SIM.ROCK_HIT : SIM.CAMPFIRE_HIT)) ** 2) {
+          hit = true;
+          break;
+        }
+      }
+      if (bounce) {
+        st.vy = -SIM.ROCK_BOUNCE_VY;
+        p.bounceId = f.id;
+        p.bounceT = 0.4;
+        this._addTrick(ev, 'rockBounce', 'Rock Bounce', TRICKS.ROCK_BOUNCE);
+        continue;
+      }
+      if (!hit) continue;
+      if (st.shield) {
+        this.consumed.add(f.id);
+        ev.push({ type: SimEvent.ROCK_SMASH, data: { featureId: f.id, x: f.x, y: cy } });
+        if (isRock) this._addTrick(ev, 'rockSmash', 'Rock Smash', TRICKS.ROCK_SMASH);
+        else this._addTrick(ev, 'campfireSmash', 'Campfire Smash', TRICKS.CAMPFIRE_SMASH);
+        continue;
+      }
+      this._crash(isRock ? 'rock' : 'campfire', ev, { obstacleEnd: f.x + r });
+      return;
+    }
+  }
+
+  /* ------------------------------------------------------------ crash */
+
+  _crash(cause, ev, info = {}) {
+    const st = this.state;
+    const p = this._p;
+    ev.push({ type: SimEvent.CRASH, data: { cause, x: st.x, y: st.y } });
+    if (p.grind) this._endGrind(ev);
+    st.stats.crashes++;
+    st.combo.points = 0;
+    st.combo.mult = 0;
+    st.combo.tricks = [];
+    st.scarf = 0;
+    st.boostT = 0;
+    st.boostLevel = 0;
+    st.shield = false;
+    st.flips = 0;
+    st.airTime = 0;
+    if (!info.chasm && !this.course._chasmAt(st.x)) st.y = Math.min(st.y, this._surf(st.x));
+    p.phys = 'crashed';
+    p.crashCause = cause;
+    p.crashChasm = info.chasm || null;
+    p.crashT = cause === 'chasm' ? SIM.CHASM_RESPAWN_T : SIM.CRASH_T;
+    p.respawnMinX = info.obstacleEnd ?? -Infinity;
+    p.overChasm = null;
+    p.s = Math.max(0, st.vx) * 0.75;
+    st.angVel = st.angVel < -2 ? -SIM.CRASH_SPIN : SIM.CRASH_SPIN;
+    if (cause === 'rock' || cause === 'campfire') st.vx *= 0.6;
+  }
+
+  _crashed(ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    p.crashT -= dt;
+    st.angVel *= Math.exp(-SIM.CRASH_SPIN_DECAY * dt);
+    st.angle += st.angVel * dt;
+    if (p.crashChasm) {
+      const ch = p.crashChasm;
+      st.vy += GRAVITY * dt;
+      st.vx *= Math.exp(-3 * dt);
+      st.x = clamp(st.x + st.vx * dt, ch.x0 + 6, ch.x1 - 6);
+      st.y += st.vy * dt;
+      if (st.y >= ch.floorY) {
+        st.y = ch.floorY;
+        st.vy = 0;
+        st.vx = 0;
+      }
+    } else {
+      const ground = this._surf(st.x);
+      if (st.y < ground - 0.5) {
+        st.vy += GRAVITY * dt;
+        st.vx *= Math.exp(-0.8 * dt);
+        st.x += st.vx * dt;
+        st.y += st.vy * dt;
+        const ch = c._chasmAt(st.x);
+        if (ch) {
+          p.crashChasm = ch;
+          p.crashT = Math.max(p.crashT, 1.0);
+        } else if (st.y >= this._surf(st.x)) {
+          const th = Math.atan(c.slopeAt(st.x));
+          st.y = this._surf(st.x);
+          p.s = Math.max(0, st.vx * Math.cos(th) + st.vy * Math.sin(th)) * 0.6;
+        }
+      } else {
+        p.s *= Math.exp(-SIM.CRASH_FRICTION * dt);
+        const th = Math.atan(c.slopeAt(st.x));
+        st.vx = p.s * Math.cos(th);
+        st.vy = p.s * Math.sin(th);
+        st.x += st.vx * dt;
+        const ch = c._chasmAt(st.x);
+        if (ch) {
+          p.crashChasm = ch;
+          p.crashT = Math.max(p.crashT, 1.0);
+        } else {
+          st.y = this._surf(st.x);
+        }
+      }
+    }
+    if (p.crashT <= 0) this._respawn(ev);
+  }
+
+  _respawn(ev) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    let x = st.x;
+    if (p.crashChasm) x = p.crashChasm.x1 + SIM.CHASM_RESPAWN_OFFSET;
+    if (p.respawnMinX > -Infinity) x = Math.max(x, p.respawnMinX + SIM.RESPAWN_CLEAR);
+    for (let iter = 0; iter < 8; iter++) {
+      let moved = false;
+      const ch = c._chasmAt(x);
+      if (ch) {
+        x = ch.x1 + SIM.CHASM_RESPAWN_OFFSET;
+        moved = true;
+      }
+      for (const f of c.featuresIn(x - 40, x + 40)) {
+        if ((f.type === FeatureType.ROCK || f.type === FeatureType.CAMPFIRE) && !this.consumed.has(f.id) && Math.abs(f.x - x) < f.size + 4) {
+          x = f.x + f.size + SIM.RESPAWN_CLEAR;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    x = Math.min(x, c.maxX - 20);
+    const th = Math.atan(c.slopeAt(x));
+    st.x = x;
+    st.y = this._surf(x);
+    st.angle = th;
+    st.angVel = 0;
+    p.s = SIM.RESPAWN_SPEED;
+    st.vx = p.s * Math.cos(th);
+    st.vy = p.s * Math.sin(th);
+    p.phys = 'ground';
+    p.invulnT = SIM.RESPAWN_INVULN;
+    p.crashChasm = null;
+    p.respawnMinX = -Infinity;
+    p.bufferT = 0;
+    ev.push({ type: SimEvent.RESPAWN, data: { x: st.x, y: st.y } });
+  }
+
+  /* ------------------------------------------------------------ pickups */
+
+  _pickups(ev) {
+    const st = this.state;
+    const p = this._p;
+    const bx = st.x + BODY_CENTER * Math.sin(st.angle);
+    const by = st.y - BODY_CENTER * Math.cos(st.angle);
+    const magnet = st.magnetT > 0;
+    const R = magnet ? SIM.MAGNET_RADIUS : SIM.PICKUP_RADIUS;
+    for (const f of this.course.featuresIn(bx - R, bx + R)) {
+      if (f.type !== FeatureType.PICKUP || this.consumed.has(f.id)) continue;
+      const rr = f.kind === PickupKind.COIN ? R : SIM.PICKUP_RADIUS;
+      const dx = f.x - bx;
+      const dy = f.y - by;
+      if (dx * dx + dy * dy > rr * rr) continue;
+      this.consumed.add(f.id);
+      ev.push({ type: SimEvent.PICKUP, data: { featureId: f.id, kind: f.kind, x: f.x, y: f.y } });
+      if (f.kind === PickupKind.COIN) {
+        st.stats.coins++;
+        st.scarf = Math.min(1, st.scarf + SIM.SCARF_PER_COIN);
+        if (p.phys === 'air' || p.phys === 'grind') st.combo.points += TRICKS.COIN;
+        else st.stats.score += TRICKS.COIN;
+      } else if (f.kind === PickupKind.FEATHER) {
+        st.hoverT = SIM.HOVER_T;
+      } else if (f.kind === PickupKind.MAGNET) {
+        st.magnetT = SIM.MAGNET_T;
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------ derived */
+
+  _derive(held) {
+    const st = this.state;
+    const p = this._p;
+    const c = this.course;
+    st.speed = Math.hypot(st.vx, st.vy);
+    if (st.speed > st.stats.topSpeed) st.stats.topSpeed = st.speed;
+    st.progress = clamp((st.x - c.startX) / c.length, 0, 1);
+    let target = 0.2;
+    if (p.phys === 'air') target = held ? 1 : 0.35;
+    else if (p.phys === 'grind') target = 0.55;
+    else if (p.phys === 'crashed') target = 0;
+    else target = clamp(0.2 + 0.6 * p.landSquash, 0, 1);
+    st.crouch = damp(st.crouch, target, 14, dt);
+    if (p.phys === 'crashed') st.mode = RiderMode.CRASHED;
+    else if (st.finishTick >= 0) st.mode = RiderMode.FINISHED;
+    else st.mode = p.phys === 'air' ? RiderMode.AIR : p.phys === 'grind' ? RiderMode.GRIND : RiderMode.GROUND;
+  }
+}

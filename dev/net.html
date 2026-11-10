@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snowline net test</title>
+<style>
+  body { font: 14px system-ui, sans-serif; background: #1d2a3a; color: #e8eef5; margin: 0; padding: 16px; max-width: 900px; }
+  h1 { font-size: 18px; } h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: #8fb0d0; margin: 18px 0 6px; }
+  button { background: #2f4a68; color: #fff; border: 0; border-radius: 6px; padding: 7px 12px; margin: 2px; cursor: pointer; }
+  button:hover { background: #3f6288; } button:disabled { opacity: .4; cursor: default; } button.on { background: #c0643a; }
+  input, select { background: #12202e; color: #e8eef5; border: 1px solid #3a5470; border-radius: 4px; padding: 5px; }
+  label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; }
+  table { border-collapse: collapse; width: 100%; } td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #2f4a68; font-variant-numeric: tabular-nums; }
+  .code { font: 700 28px ui-monospace, monospace; letter-spacing: .2em; color: #f4d35e; }
+  #log { color: #8fb0d0; font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; max-height: 260px; overflow: auto; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>Snowline net test</h1>
+<p>
+  <label>name <input id="name" maxlength="14" value="Rider"></label>
+  <label>colour <input id="color" type="number" min="0" max="11" value="0" style="width:4em"></label>
+  <label><input type="checkbox" id="local"> loopback (no internet, same-origin tabs)</label>
+</p>
+<p>
+  <button id="create">Create room</button>
+  <input id="joinCode" placeholder="CODE" maxlength="7" size="7" style="text-transform:uppercase">
+  <button id="join">Join</button>
+  <button id="leave" disabled>Leave</button>
+</p>
+<p>Room <span class="code" id="code">—</span> &nbsp; broker <b id="broker">—</b> &nbsp; status <b id="status">—</b> &nbsp; phase <b id="phase">—</b> &nbsp; host <b id="host">—</b> &nbsp; rtt→host <b id="rtt">—</b></p>
+<p><small id="share"></small></p>
+
+<h2>Host controls</h2>
+<p>
+  <label>length <select id="length"><option>sprint</option><option selected>classic</option><option>marathon</option></select></label>
+  <label>bots <input id="bots" type="number" min="0" max="6" value="0" style="width:4em"></label>
+  <button id="start" disabled>Start race</button>
+  <button id="lobby" disabled>Back to lobby</button>
+  <button id="send">Send fake state @12 Hz</button>
+  <button id="finish" disabled>Report finish</button>
+</p>
+<p>GO in <b id="go">—</b></p>
+
+<h2>Roster</h2>
+<table><thead><tr><th>#</th><th>name</th><th>id</th><th>host</th><th>conn</th><th>ready</th><th>state Hz</th><th>jitter ms</th><th>rtt→host ms</th></tr></thead><tbody id="roster"></tbody></table>
+
+<h2>Hall of fame (WinnersStore)</h2>
+<p><label>key <input id="hofKey" size="40"></label> <button id="hofAdd">add test record</button> <button id="hofList">list</button> <span id="hofOut"></span></p>
+
+<h2>Log</h2>
+<div id="log"></div>
+
+<script type="module">
+import { Room } from '../src/net/Room.js';
+import { WinnersStore } from '../src/store/WinnersStore.js';
+import { PLAYER_COLORS } from '../src/contracts.js';
+import { BROKERS } from '../src/net/brokers.js';
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+$('local').checked = params.get('net') === 'local';
+$('hofKey').value = params.get('hofKey') || 'snowline-hof-dev-r4Tq8ZpK2wXm';
+if (params.get('room')) $('joinCode').value = params.get('room');
+const log = (...a) => {
+  const line = `${(performance.now() / 1000).toFixed(2)} ${a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')}`;
+  $('log').textContent = line + '\n' + $('log').textContent.slice(0, 8000);
+  console.log('[net]', line);
+};
+window.netLog = [];
+
+let room = null;
+let sendTimer = null;
+let tick = 0;
+let start = null;
+// ?broker=<id> pins one broker (both sides must use it, the code then maps into that 1-item list)
+const pinned = BROKERS.filter((b) => b.id === params.get('broker'));
+const opts = () => ($('local').checked ? { net: 'local' } : pinned.length ? { brokers: pinned } : {});
+const profile = () => ({ name: $('name').value, colorIndex: +$('color').value });
+
+function attach(r) {
+  room = window.room = r;
+  window.netLog = [];
+  for (const ev of ['players', 'settings', 'start', 'finish', 'results', 'phase', 'status', 'closed']) {
+    r.on(ev, (x) => {
+      window.netLog.push([ev, x]);
+      log(ev, x);
+      render();
+    });
+  }
+  r.on('start', (s) => (start = s));
+  r.on('closed', () => {
+    room = window.room = null;
+    stopSend();
+    render();
+  });
+  r.setCourseSpan(0, 10000);
+  render();
+}
+
+$('create').onclick = async () => {
+  try {
+    log('creating…');
+    attach(await Room.create(profile(), opts()));
+    log('created', room.code, 'on', room.brokerName);
+  } catch (e) {
+    log('create failed:', e.message);
+  }
+};
+$('join').onclick = async () => {
+  try {
+    log('joining', $('joinCode').value);
+    attach(await Room.join($('joinCode').value, profile(), opts()));
+    log('joined', room.code);
+  } catch (e) {
+    log('join failed:', e.message);
+    window.lastJoinError = e.message;
+  }
+};
+$('leave').onclick = () => room && room.leave();
+$('name').onchange = $('color').onchange = () => room && room.setProfile(profile());
+$('length').onchange = $('bots').onchange = () => room && room.setSettings({ length: $('length').value, bots: +$('bots').value });
+$('start').onclick = () => room && room.startRace();
+$('lobby').onclick = () => room && room.backToLobby();
+$('finish').onclick = () => {
+  if (!room || !start) return;
+  room.reportFinish({ id: room.selfId, name: '', colorIndex: 0, timeMs: Math.max(10000, performance.now() - start.goAtLocalMs), progress: 1, stats: {} });
+};
+function stopSend() {
+  clearInterval(sendTimer);
+  sendTimer = null;
+  $('send').classList.remove('on');
+}
+$('send').onclick = () => {
+  if (sendTimer) return stopSend();
+  $('send').classList.add('on');
+  sendTimer = setInterval(() => room && room.sendState([tick++, tick * 40, 3000, 0, 480, 0, 1, 0, 50]), 1000 / 12);
+};
+
+const store = () => new WinnersStore({ key: $('hofKey').value });
+$('hofAdd').onclick = async () => {
+  const rec = { name: $('name').value, colorIndex: +$('color').value, timeMs: 61234, length: 'classic', players: 3, score: 1200, room: room?.code || 'DEVXX', at: Date.now() };
+  $('hofOut').textContent = 'adding…';
+  $('hofOut').textContent = 'stored: ' + (await store().add(rec));
+};
+$('hofList').onclick = async () => {
+  const l = await store().list(10);
+  $('hofOut').textContent = l.map((r) => `${r.name} ${(r.timeMs / 1000).toFixed(1)}s ${r.room}`).join(' · ') || '(empty)';
+};
+window.WinnersStore = WinnersStore;
+window.Room = Room;
+
+function render() {
+  const r = room;
+  $('code').textContent = r ? r.code : '—';
+  $('broker').textContent = r ? r.brokerName : '—';
+  $('status').textContent = r ? r.status : '—';
+  $('phase').textContent = r ? r.phase + (r.race && !r.isRacing ? ' (spectating)' : '') : '—';
+  $('host').textContent = r ? (r.isHost ? 'me' : r.players.find((p) => p.isHost)?.name || '?') : '—';
+  $('share').textContent = r ? r.shareUrl : '';
+  $('leave').disabled = !r;
+  $('start').disabled = !r || !r.isHost;
+  $('lobby').disabled = !r || !r.isHost;
+  $('finish').disabled = !r || !r.isRacing;
+  const st = r ? r.netStats() : { peers: {} };
+  $('rtt').textContent = r ? (r.isHost ? '0 (host)' : `${Math.round(st.rttMs)} ms (min ${Math.round(st.minRttMs)})`) : '—';
+  $('roster').innerHTML = '';
+  (r ? r.players : []).forEach((p, i) => {
+    const s = st.peers[p.id] || {};
+    const tr = document.createElement('tr');
+    const cells = [i + 1, '', p.id, p.isHost ? '★' : '', p.connected ? 'yes' : 'NO', p.ready ? 'yes' : 'no',
+      p.id === r.selfId ? '(me)' : (s.rateHz ?? 0).toFixed(1), Number.isFinite(s.jitterMs) ? s.jitterMs.toFixed(0) : '—',
+      p.id === r.selfId ? Math.round(st.rttMs) || 0 : Number.isFinite(s.rttMs) ? s.rttMs : '—'];
+    cells.forEach((c, k) => {
+      const td = document.createElement('td');
+      if (k === 1) {
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.style.background = PLAYER_COLORS[p.colorIndex];
+        td.append(dot, ' ', p.name);
+      } else td.textContent = String(c);
+      tr.append(td);
+    });
+    $('roster').append(tr);
+  });
+  $('go').textContent = start && r && r.race ? `${((start.goAtLocalMs - performance.now()) / 1000).toFixed(2)} s` : '—';
+}
+setInterval(render, 250);
+render();
+</script>
+</body>
+</html>

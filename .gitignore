@@ -1,0 +1,7 @@
+# Course material (not part of the game)
+*.pdf
+*.pde
+20261008 - Catmull-Rom.js
+
+.DS_Store
+node_modules/
