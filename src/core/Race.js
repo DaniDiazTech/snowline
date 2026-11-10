@@ -125,6 +125,10 @@ export class Race {
     /** ticks simulated since GO (keeps counting after the local rider finishes) */
     this.tick = 0;
     this.held = false;
+    /** timestamped button edges not yet consumed by the simulation: [{t, held}] */
+    this.inputQueue = [];
+    /** a press that began and ended between two ticks still has to count as one tick of input */
+    this.tapPending = false;
     this.alpha = 1;
     /** local events since the last drain() */
     this.events = [];
@@ -147,8 +151,25 @@ export class Race {
     return this.tick * TICK_MS;
   }
 
-  setInput(held) {
-    this.held = held;
+  /**
+   * Button edge at time `t` (performance.now()). Edges are replayed at the tick they happened on, so a
+   * slow frame can neither stretch a tap into a hold nor swallow it.
+   */
+  setInput(held, t = performance.now()) {
+    this.inputQueue.push({ t, held: !!held });
+  }
+
+  /** Button state for the tick that ends at `tickEndMs`. */
+  inputAt(tickEndMs) {
+    const q = this.inputQueue;
+    let pressed = false;
+    while (q.length && q[0].t <= tickEndMs) {
+      const edge = q.shift();
+      if (edge.held && !this.held) pressed = true;
+      this.held = edge.held;
+    }
+    // Down and up inside the same tick: still one tick of "held".
+    return this.held || pressed;
   }
 
   addRemote(info) {
@@ -182,7 +203,8 @@ export class Race {
     const n = Math.min(due, MAX_TICKS_PER_FRAME);
     for (let i = 0; i < n; i++) {
       this.tick++;
-      const input = this.local.bot ? this.local.bot.decide(this.state) : { held: this.held };
+      const held = this.inputAt(this.goAtMs + this.tick * TICK_MS);
+      const input = this.local.bot ? this.local.bot.decide(this.state) : { held };
       const events = this.local.step(input);
       for (const e of events) {
         this.events.push(e);
