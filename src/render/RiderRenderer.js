@@ -609,7 +609,7 @@ export class RiderRenderer {
     const hy = Y + (((J.a1.x + J.a2.x) / 2) * sa + ((J.a1.y + J.a2.y) / 2) * ca) * K;
     const e = Math.min(1, vs.rescueAge / 0.7);
     const ease = 1 - (1 - e) * (1 - e) * (1 - e);
-    const rope = 34 + 260 * (1 - ease); // descends from high up, then holds a short rope
+    const rope = 34 + 110 * (1 - ease); // comes down a little, then holds a short rope
     const sway = Math.sin(t * 1.7) * 6;
     const bx = hx - sway;
     const by = hy - rope;

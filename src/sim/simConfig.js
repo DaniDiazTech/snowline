@@ -56,7 +56,7 @@ export const SIM = Object.freeze({
   SQUASH_REF: 700, // normal impact speed (px/s) that gives a full crouch dip
   SQUASH_RECOVER: 2.5, // 1/s
   MIN_LAND_SPEED: 60, // px/s floor after a landing onto a steep up-slope
-  IMPACT_REF: 900, // normal speed (px/s) that maps to impact = 1 (LAND event)
+  IMPACT_REF: 1400, // normal speed (px/s) that maps to impact = 1 (LAND event): a tap jump ≈ 0.4, a pit drop ≈ 0.7
   MICRO_AIR: 0.12, // s: natural (no jump) air phases shorter than this emit no LAND
   PROXIMITY_DIST: 30, // head-to-snow distance for a Proximity Flip (px)
   BIG_AIR_T: 1.6, // s of air for Big Air
@@ -100,7 +100,7 @@ export const SIM = Object.freeze({
   /* ---- pit rescue ---- */
   RESCUE_T: 3.0, // s: the true cost of falling into a pit
   RESCUE_DEPTH: 40, // px below the lip line that triggers the rescue
-  RESCUE_LAND_OFFSET: 90, // px past the far edge where the rider is set down
+  RESCUE_LAND_OFFSET: 60, // px past the far edge where the rider is set down
   RESCUE_ARC_H: 150, // px above the higher lip at the top of the lift
   RESCUE_LEAD: 170, // px: length of the final approach along the far slope
   RESCUE_SETDOWN_H: 50, // px: that approach starts this far above the slope

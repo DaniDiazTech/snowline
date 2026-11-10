@@ -96,16 +96,18 @@ export class Effects {
   }
 
   /** Big dark blurred pines sweeping past in the foreground. */
-  drawForeground(ctx, cam, P, L, startX, riderSX) {
+  drawForeground(ctx, cam, P, L, startX, riderSX, avoid) {
     const col = mix(P.deep, P.sil, 0.15);
     this.tintForeground(col);
     const k = cam.scale * FG_PAR;
-    const sprH = L.h * 1.25;
+    // smaller viewports (phones): smaller, rarer foreground trees
+    const vk = clamp(Math.min(L.w, L.h) / 900, 0.4, 1);
+    const sprH = L.h * (0.8 + 0.45 * vk);
     const sprW = sprH * this.fgAspect;
     const fx0 = cam.x + (-sprW - cam.anchorX) / k;
     const fx1 = cam.x + (L.w + sprW - cam.anchorX) / k;
     for (let i = Math.floor(fx0 / FG_SPACING); i <= Math.ceil(fx1 / FG_SPACING); i++) {
-      if (hash01(i, 4242) < 0.78) continue;
+      if (hash01(i, 4242) < 0.78 + 0.12 * (1 - vk)) continue;
       const fx = i * FG_SPACING + hash01(i, 4243) * FG_SPACING * 0.5;
       if (fx < startX + 800) continue; // keep the start line clear
       const sx = cam.anchorX + (fx - cam.x) * k;
@@ -115,7 +117,10 @@ export class Effects {
       const half = sprW * s * 0.36; // the dense part of the blurred tree
       const gapRider = Math.abs(sx - riderSX) - half - 120;
       const gapHud = sx - half - 330;
-      const a = 0.92 * smoothstep(0, 160, Math.min(gapRider, gapHud));
+      let gap = Math.min(gapRider, gapHud);
+      // never over a hazard the rider is about to meet (screen x ranges passed by the renderer)
+      for (let a = 0; a < avoid.n; a++) gap = Math.min(gap, Math.max(avoid.l[a] - (sx + half), sx - half - avoid.r[a]) - 40);
+      const a = 0.92 * smoothstep(0, 160, gap);
       if (a <= 0.01) continue;
       ctx.globalAlpha = a;
       ctx.drawImage(this.fgTint, sx - (sprW * s) / 2, top, sprW * s, sprH * s);
@@ -129,7 +134,8 @@ export class Effects {
     const boost = fx.boost;
     if (boost > 0.01) {
       // speed streaks: thin wind lines in a band around the rider, flowing backwards
-      const n = Math.round(boost * 16);
+      const vk = clamp(Math.min(L.w, L.h) / 900, 0.4, 1);
+      const n = Math.round(boost * 16 * vk);
       const dir = fx.dir;
       const cx = Math.cos(dir);
       const sy = Math.sin(dir);
@@ -141,7 +147,7 @@ export class Effects {
         const u = (t / life + hash01(i, 78)) % 1;
         const y0 = cy + (hash01(i, 79 + cyc) - 0.5) * L.h * 0.5;
         const x = L.w * (1.05 - u * 1.3);
-        const len = (50 + 110 * hash01(i, 80 + cyc)) * (0.7 + boost * 0.3);
+        const len = (50 + 110 * hash01(i, 80 + cyc)) * (0.7 + boost * 0.3) * (0.5 + 0.5 * vk);
         if (Math.abs(y0 - cy) < L.h * 0.05) continue; // keep the rider clear
         const a = Math.sin(u * Math.PI) * 0.16 * boost;
         ctx.strokeStyle = `rgba(255,255,255,${a})`;
@@ -168,9 +174,10 @@ export class Effects {
       if (age < 0 || age > dur) this.burst = null;
       else {
         const u = age / dur;
-        const n = 10 + 6 * lv;
-        const r0 = 30 + u * (120 + 90 * lv);
-        const len = (36 + 34 * lv) * (1 - u * 0.5);
+        const vk = clamp(Math.min(L.w, L.h) / 900, 0.4, 1);
+        const n = Math.round((10 + 6 * lv) * (0.6 + 0.4 * vk));
+        const r0 = (30 + u * (120 + 90 * lv)) * (0.55 + 0.45 * vk);
+        const len = (36 + 34 * lv) * (1 - u * 0.5) * (0.55 + 0.45 * vk);
         ctx.lineCap = 'round';
         ctx.strokeStyle = `rgba(255,255,255,${(0.5 + 0.08 * lv) * (1 - u) * (1 - u)})`;
         ctx.lineWidth = 1.2 + 0.6 * lv;

@@ -41,7 +41,7 @@ export function terminalSpeed(slope) {
 }
 
 /** Extra upward kick when a jump is taken on a ramp (kicker), px/s. */
-export const RAMP_POP = 260;
+export const RAMP_POP = 120;
 
 /** Height of the rider's body centre above the board contact point, px (pickups). */
 export const BODY_CENTER = 18;

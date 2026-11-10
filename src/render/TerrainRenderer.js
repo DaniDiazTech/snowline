@@ -57,11 +57,22 @@ export class TerrainRenderer {
     // power-of-two-ish quantised step so the grid is stable under small zoom changes
     const q = Math.pow(2, Math.round(Math.log2(step) * 2) / 2);
     const chasms = (this.chasms = []);
-    for (const f of course.featuresIn(x0 - 50, x1 + 50)) if (f.type === FeatureType.CHASM) chasms.push(f);
+    const ramps = [];
+    for (const f of course.featuresIn(x0 - 50, x1 + 50)) {
+      if (f.type === FeatureType.CHASM) chasms.push(f);
+      else if (f.type === FeatureType.RAMP) ramps.push(f);
+    }
+    // fine sampling across each ramp's curl and lip (~1.5 screen px), so the lip stays crisp
+    const fine = Math.max(0.5, 1.5 / cam.scale);
+    let ri = 0;
     let n = 0;
     let ci = 0;
     const push = (x, inPit) => {
       if (n >= MAX_SAMPLES) return;
+      // invariants: strictly increasing x, and nothing inside a pit is ever treated as surface
+      // (a surface sample at the pit floor would drag the snow polygon + lip stroke down the cliff)
+      if (n > 0 && x <= this.wx[n - 1]) return;
+      if (!inPit) for (let k = 0; k < chasms.length; k++) if (x > chasms[k].x0 && x < chasms[k].x1) inPit = true;
       this.wx[n] = x;
       const y = course.heightAt(x);
       this.sx[n] = cam.sx(x);
@@ -81,6 +92,27 @@ export class TerrainRenderer {
         push(e1 - 0.01, true);
         push(e1 + 0.01, false);
         if (x < e1) x = Math.ceil(e1 / q) * q;
+      }
+      while (ri < ramps.length && (ramps[ri].lipX ?? ramps[ri].x1 ?? ramps[ri].x) + 40 < x) ri++;
+      const r = ramps[ri];
+      if (r) {
+        const lip = r.lipX ?? r.x1 ?? r.x;
+        const a = lip - Math.max(40, (lip - (r.x0 ?? lip - 120)) * 0.6);
+        if (x >= a && x <= lip + 40) {
+          // dense run through the curl up to the lip; if a pit starts at the lip, hand over to
+          // the chasm edge injection (never sample inside the pit as surface)
+          for (let fx = Math.max(x, a); fx < lip - 0.02; fx += fine) push(fx, false);
+          ri++;
+          const pitAtLip = ci < chasms.length && chasms[ci].x0 <= lip + 40;
+          if (pitAtLip) {
+            x = Math.max(lip, chasms[ci].x0);
+            continue;
+          }
+          push(lip, false);
+          for (let fx = lip + fine; fx < lip + 40; fx += fine * 2) push(fx, false);
+          x = Math.ceil((lip + 40) / q) * q;
+          continue;
+        }
       }
       push(x, false);
       x += q;
@@ -239,14 +271,14 @@ export class TerrainRenderer {
       ctx.fillStyle = g;
       ctx.beginPath();
       const steps = Math.max(4, Math.ceil(gw / (14 * k)));
-      ctx.moveTo(xa, ya + 2);
+      ctx.moveTo(xa - 1, ya + 2);
       for (let i = 1; i < steps; i++) {
         const x = xa + (gw * i) / steps;
         ctx.lineTo(x, rimY(x));
       }
-      ctx.lineTo(xb, yb + 2);
-      ctx.lineTo(xb, Math.max(L.h + 20, yLow + 1));
-      ctx.lineTo(xa, Math.max(L.h + 20, yLow + 1));
+      ctx.lineTo(xb + 1, yb + 2);
+      ctx.lineTo(xb + 1, Math.max(L.h + 20, yLow + 1));
+      ctx.lineTo(xa - 1, Math.max(L.h + 20, yLow + 1));
       ctx.closePath();
       ctx.fill();
       if (!narrow) {

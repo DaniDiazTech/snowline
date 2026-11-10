@@ -117,58 +117,115 @@ function buildRock(v) {
 }
 
 function ramp(ctx, f, P, course) {
-  // packed-snow kicker: a compacted highlight along the run-up, a wooden edge at the lip,
-  // two marker flags just before it
+  // A BUILT kicker: packed-snow body with scoop shading, groove lines on the run-up, painted
+  // chevrons in the accent colour, a wooden lip with a front board and support stakes, flags.
   const lip = f.lipX ?? f.x1 ?? f.x;
-  const x0 = Math.max(f.x0 ?? lip - 160, lip - 220);
+  const x0 = f.x0 ?? lip - 160;
+  const hLip = course.heightAt(lip);
+  const size = Math.max(8, f.size || 20);
+  // base line under the kicker: from where the run-up starts to `size` below the lip
+  const by0 = course.heightAt(x0);
+  const by1 = hLip + size;
+  const baseY = (x) => by0 + ((by1 - by0) * (x - x0)) / (lip - x0 || 1);
+  const step = Math.max(2, (lip - x0) / 40);
+  // 1. body: shaded wedge between the surface and the base, darker towards the lip (the scoop)
+  const g = ctx.createLinearGradient(x0, 0, lip, 0);
+  g.addColorStop(0, rgba(P.shade, 0));
+  g.addColorStop(0.5, rgba(P.shade, 0.32));
+  g.addColorStop(1, rgba(mix(P.shade, P.shadeDeep, 0.6), 0.7));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x0, course.heightAt(x0) + 1);
+  for (let x = x0; x <= lip; x += step) ctx.lineTo(x, course.heightAt(x) + 1.5);
+  ctx.lineTo(lip, hLip + 1.5);
+  ctx.lineTo(lip, by1);
+  for (let x = lip; x >= x0; x -= step) ctx.lineTo(x, Math.max(baseY(x), course.heightAt(x) + 1.5));
+  ctx.closePath();
+  ctx.fill();
+  // 2. packed-snow highlight + groove lines following the curl
   ctx.lineCap = 'round';
-  ctx.strokeStyle = rgba(mix(P.snow, [255, 255, 255], 0.6), 0.9);
+  ctx.strokeStyle = rgba(mix(P.snow, [255, 255, 255], 0.6), 0.95);
   ctx.lineWidth = 2.2;
   ctx.beginPath();
-  for (let x = x0; x <= lip; x += 8) {
-    const y = course.heightAt(x) + 1.5;
+  for (let x = x0; x <= lip; x += step) {
+    const y = course.heightAt(x) + 1.2;
     if (x === x0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  // ridges of packed snow on the ramp face
-  ctx.strokeStyle = rgba(P.shade, 0.35);
+  ctx.strokeStyle = rgba(P.shade, 0.45);
   ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let x = lip - 90; x < lip - 12; x += 14) {
-    const y = course.heightAt(x);
-    ctx.moveTo(x, y + 3);
-    ctx.lineTo(x + 6, course.heightAt(x + 6) + 6);
+  for (const off of [5, 10]) {
+    ctx.beginPath();
+    for (let x = x0 + (lip - x0) * 0.15; x <= lip - 3; x += step) {
+      const y = course.heightAt(x) + off * Math.min(1, size / 30);
+      if (x <= x0 + (lip - x0) * 0.15 + 0.01) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
-  // wooden edge along the last stretch before the lip + a stake under it
+  // 3. painted chevrons on the face (accent colour), pointing up the ramp
+  const acc = mix(P.festive[0], P.accent, 0.35);
+  ctx.fillStyle = rgba(acc, 0.85);
+  for (let k = 0; k < 3; k++) {
+    const cx = lip - 16 - k * Math.max(12, (lip - x0) * 0.09);
+    const cy = course.heightAt(cx);
+    const ang = Math.atan2(course.heightAt(cx + 2) - course.heightAt(cx - 2), 4);
+    const d = Math.min(9, size * 0.28);
+    ctx.save();
+    ctx.translate(cx, cy + 3 + d * 0.6);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.moveTo(-3, -d * 0.5);
+    ctx.lineTo(1.5, 0);
+    ctx.lineTo(-3, d * 0.5);
+    ctx.lineTo(-0.5, d * 0.5);
+    ctx.lineTo(4, 0);
+    ctx.lineTo(-0.5, -d * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  // 4. wooden lip: plank along the last stretch, a front board and support stakes on the far side
   const wood = mix([150, 100, 60], P.sil, 0.3 + 0.4 * P.night);
+  const woodDark = mix(wood, P.sil, 0.4);
   ctx.strokeStyle = rgba(wood);
-  ctx.lineWidth = 3.4;
+  ctx.lineWidth = 3.6;
   ctx.beginPath();
-  for (let x = lip - 34; x <= lip; x += 4) {
+  for (let x = lip - 30; x <= lip; x += 2) {
     const y = course.heightAt(x) + 1;
-    if (x === lip - 34) ctx.moveTo(x, y);
+    if (x <= lip - 30 + 0.01) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  ctx.fillStyle = rgba(mix(wood, P.sil, 0.35));
-  const ly = course.heightAt(lip);
-  ctx.fillRect(lip - 2.5, ly, 3, 10);
-  for (const [dx, col] of [
-    [-12, 0],
-    [-52, 1],
+  const front = Math.min(size * 0.8, 50);
+  ctx.fillStyle = rgba(woodDark);
+  ctx.fillRect(lip - 1.5, hLip - 0.5, 3.5, front);
+  ctx.fillStyle = rgba(wood);
+  for (const [dx, lean] of [
+    [3, 0.25],
+    [10, 0.45],
   ]) {
-    const x = lip + dx;
+    ctx.save();
+    ctx.translate(lip + dx * 0.4, hLip + 2);
+    ctx.rotate(-lean);
+    ctx.fillRect(-1.2, 0, 2.4, front * 0.95);
+    ctx.restore();
+  }
+  // 5. flags at the run-up start and beside the lip
+  for (const [x, col, h] of [
+    [lip - 8, 0, 38],
+    [x0 + 6, 1, 30],
+  ]) {
     const gy = course.heightAt(x);
     ctx.fillStyle = rgba(P.sil);
-    ctx.fillRect(x - 1, gy - 34, 2, 37);
+    ctx.fillRect(x - 1, gy - h, 2, h + 3);
     ctx.fillStyle = rgba(P.festive[col]);
-    const w = Math.sin(P.t * 8 + dx) * 2;
+    const w = Math.sin(P.t * 8 + x) * 2;
     ctx.beginPath();
-    ctx.moveTo(x + 1, gy - 34);
-    ctx.lineTo(x + 15, gy - 29 + w);
-    ctx.lineTo(x + 1, gy - 24);
+    ctx.moveTo(x + 1, gy - h);
+    ctx.lineTo(x + 16, gy - h + 5 + w);
+    ctx.lineTo(x + 1, gy - h + 10);
     ctx.closePath();
     ctx.fill();
   }

@@ -20,7 +20,7 @@ It is a one-button game. Everything else is timing.
 - **The scarf is your momentum.** It grows with every landed combo and raises your cruising speed. A crash resets it.
 - **While boosting you have a shield** for a moment: rocks and campfires are smashed instead of stopping you.
 - **Obstacles:** rocks, logs, snowmen, ice spikes and campfires. Jump them.
-- **Pits** always have a ramp: jump from it. If you fall in anyway, a balloon lifts you across to the far side for a 3-second penalty.
+- **Pits** always have a launch ramp just before the edge: jump from the lip (a great spot for a held backflip). If you fall in anyway, a balloon lifts you across to the far side for a 3-second penalty.
 - **Landings:** a clean landing keeps your combo. A slightly-off landing slides out and loses the combo instead of crashing; only a bad one crashes.
 - Grind the **bunting lines**, **rooftops** and **ice**. Grab coins, the feather (hover) and the magnet.
 - Nobody gets stuck: a crash only costs time.

@@ -87,7 +87,8 @@ export class Sfx {
   _land(t, d) {
     if (!this._begin('land')) { this.chain = 0; return; }
     const v = this.v;
-    const imp = clamp(Number(d.impact ?? 0.4) || 0, 0, 1);
+    // LAND.impact is normalised to 1400 px/s (tap jump ~0.4, pit drop ~0.7): lift it so a normal landing stays audible
+    const imp = 0.4 + 0.6 * clamp(Number(d.impact ?? 0.4) || 0, 0, 1);
     v.tone(t, { f: 120, f1: 45, dur: 0.18 + 0.18 * imp, g: 0.17 + 0.11 * imp });
     v.noise(t, { type: 'lowpass', f: 1200, f1: 250, q: 0.5, dur: 0.12 + 0.14 * imp, g: 0.09 + 0.06 * imp });
     if (d.sketchy) {

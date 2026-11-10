@@ -29,7 +29,8 @@ import { Weather } from './Weather.js';
 import { Effects } from './Effects.js';
 import { hex, mix, rgba, scale } from './color.js';
 
-const DECOR_MARGIN = 420; // world px: widest decor, so nothing pops in at the edges
+const DECOR_MARGIN = 420;
+const HAZARDS = new Set(['rock', 'log', 'snowman', 'spikes', 'campfire']); // world px: widest decor, so nothing pops in at the edges
 const MAX_GLOWS = 64;
 
 export class Renderer {
@@ -251,7 +252,7 @@ export class Renderer {
     // ---- screen-space overlays ----
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.weather.drawFog(ctx, atm, L);
-    this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x));
+    this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x), this.hazardsAhead(local, feats, cam));
     this.weather.drawPrecip(ctx, atm, L);
     const boostT = local.boostLevel ? 0.3 * local.boostLevel : 0;
     this.boostFx += (boostT - this.boostFx) * (1 - Math.exp(-dt * 5));
@@ -555,6 +556,31 @@ export class Renderer {
       ctx.lineTo(tr.x[i], tr.y[i] + 0.8);
       ctx.stroke();
     }
+  }
+
+  /** Screen x ranges of hazards within ~1.2 s of travel ahead of the local rider (no allocation). */
+  hazardsAhead(local, feats, cam) {
+    const H = this.hazards || (this.hazards = { n: 0, l: new Float32Array(32), r: new Float32Array(32) });
+    H.n = 0;
+    const reach = local.x + Math.max(300, Math.abs(local.vx) * 1.2) + 60;
+    for (const f of feats) {
+      if (H.n >= 32) break;
+      let x0;
+      let x1;
+      if (f.type === 'chasm' || f.type === 'ramp') {
+        x0 = f.type === 'ramp' ? (f.lipX ?? f.x1 ?? f.x) - 30 : f.x0 - 20;
+        x1 = f.type === 'ramp' ? (f.lipX ?? f.x1 ?? f.x) + 20 : f.x0 + 40; // the near lip
+      } else if (HAZARDS.has(f.type) && !this.consumed.has(f.id)) {
+        const w = f.w || (f.size || 20) * 2.5;
+        x0 = f.x - w / 2;
+        x1 = f.x + w / 2;
+      } else continue;
+      if (x1 < local.x - 20 || x0 > reach) continue;
+      H.l[H.n] = cam.sx(x0);
+      H.r[H.n] = cam.sx(x1);
+      H.n++;
+    }
+    return H;
   }
 
   featureById(id, x) {

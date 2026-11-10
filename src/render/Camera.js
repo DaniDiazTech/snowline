@@ -29,7 +29,9 @@ export const RIDER_FRAC_CRUISE = 0.065;
 export const RIDER_FRAC_FAST = 0.045;
 export const MIN_RIDER_PX = 26;
 export const LEAD_S = 0.9;
-const CRUISE_SPEED = 500; // px/s (≈ 21 m/s)
+const CRUISE_SPEED = 500;
+/** height of the rescue balloon + rope above the rider's board, world px */
+const BALLOON_H = 150; // px/s (≈ 21 m/s)
 const TOP_SPEED = 760; // px/s (≈ 31-32 m/s boosted)
 
 export class Camera {
@@ -139,13 +141,18 @@ export class Camera {
       wS = 1.2;
     } else if (mode === 'rescue') {
       // frame both lips of the pit while the balloon carries the rider across
+      // keep both lips AND the whole balloon (≈ 150 world px above the rider) inside the safe
+      // band: below 24 % and above 75 % of the height (HUD toast at the top)
       const r = this.rescueSpan;
       const span = Math.abs(r.x1 - r.x0) + 320;
-      scaleT = Math.min(this.sizeScale(RIDER_FRAC_CRUISE), (W * 0.75) / span);
+      const top = Math.min(rider.y - BALLOON_H, r.y0 - 40, r.y1 - 40);
+      const bot = Math.max(rider.y + 10, r.y0 + 30, r.y1 + 30);
+      scaleT = Math.min(this.sizeScale(RIDER_FRAC_CRUISE), (W * 0.75) / span, (H * 0.48) / Math.max(1, bot - top));
       tx = rider.x + ((r.x0 + r.x1) / 2 - rider.x) * 0.6;
-      ty = Math.min(r.y0, r.y1, rider.y) + Math.abs(r.y1 - r.y0) * 0.5 - 20;
-      wY = 2.5;
-      wS = 2;
+      // centre of the band (0.495 H) on the middle of [top, bot]; anchorY is 0.5 H
+      ty = (top + bot) / 2 + (0.5 - 0.495) * H / scaleT;
+      wY = 5;
+      wS = 2.5;
     } else {
       const fast = smoothstep(CRUISE_SPEED, TOP_SPEED, speed);
       const big = smoothstep(80, 600, air);
@@ -192,6 +199,14 @@ export class Camera {
     this.kickTarget = (this.kickTarget || 0) * Math.exp(-dt / 0.25);
     [this.kickAmt, this.kv] = spring(this.kickAmt || 0, this.kv || 0, this.kickTarget, 16, dt);
     if (Math.abs(this.kickAmt) < 0.0003 && this.kickTarget < 0.0003) this.kickAmt = this.kickTarget = this.kv = 0;
+    if (mode === 'rescue') {
+      // hard keep-in-band: the whole balloon + rider stays between 24 % and 75 % of the height
+      const sc = this.targetScale;
+      const topS = (rider.y - BALLOON_H - this.y) * sc + this.anchorY;
+      const botS = (rider.y + 10 - this.y) * sc + this.anchorY;
+      if (topS < H * 0.24) this.y -= (H * 0.24 - topS) / sc;
+      else if (botS > H * 0.75) this.y += (botS - H * 0.75) / sc;
+    }
     this.prevRiderX = rider.x;
     this.prevTy = ty;
     this.prevMode = mode;
