@@ -33,6 +33,7 @@ function freshPrivate() {
     phys: 'ground', // 'ground' | 'air' | 'grind' | 'crashed'
     s: 0, // speed along the surface / line (ground, grind, crash slide)
     prevHeld: false,
+    holdT: 0, // s the button has been held continuously
     bufferT: 0,
     coyoteT: 0,
     jumped: false, // current air phase started with a jump
@@ -139,6 +140,7 @@ export class RiderSim {
     const held = !finished && !!(input && input.held);
     const pressed = held && !p.prevHeld;
     p.prevHeld = held;
+    p.holdT = held ? p.holdT + dt : 0;
     p.bufferT = pressed ? SIM.JUMP_BUFFER : Math.max(0, p.bufferT - dt);
 
     this._timers();
@@ -184,7 +186,14 @@ export class RiderSim {
     const st = this.state;
     let m = 1 + SIM.SCARF_SPEED_BONUS * st.scarf;
     if (st.boostT > 0 && st.boostLevel > 0) m *= 1 + SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac();
-    return m;
+    return Math.min(m, SIM.MAX_SPEED_MULT);
+  }
+
+  /** Extra push (px/s²) of the active boost: proportional to its tier bonus, fading with it. */
+  _boostPush() {
+    const st = this.state;
+    if (st.boostT <= 0 || st.boostLevel <= 0) return 0;
+    return SIM.BOOST_PUSH * SIM.BOOST_TIERS[st.boostLevel - 1].bonus * this._boostFrac();
   }
 
   _boostFrac() {
@@ -351,7 +360,7 @@ export class RiderSim {
     }
     const M = this._mult();
     let a = GRAVITY * Math.sin(th) - (DRAG_K / (M * M)) * p.s * Math.abs(p.s);
-    if (st.boostT > 0 && p.s < M * Math.max(REF_SPEED * 0.8, terminalSpeed(Math.tan(th)))) a += SIM.BOOST_PUSH * this._boostFrac();
+    if (st.boostT > 0 && p.s < M * Math.max(REF_SPEED * 0.8, terminalSpeed(Math.tan(th)))) a += this._boostPush();
     if (finished) a -= p.s > 0 ? SIM.FINISH_BRAKE : 0;
     else if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
     p.s += a * dt;
@@ -405,7 +414,7 @@ export class RiderSim {
     st.vy *= f;
     if (st.boostT > 0 && sp > 1 && sp < M * REF_SPEED) {
       // Boost keeps pushing in the air, so style jumps never cost boosted speed.
-      const push = (SIM.BOOST_PUSH * this._boostFrac() * dt) / sp;
+      const push = (this._boostPush() * dt) / sp;
       st.vx += st.vx * push;
       st.vy += st.vy * push;
     }
@@ -420,8 +429,7 @@ export class RiderSim {
     if (held) {
       st.angVel = damp(st.angVel, -SIM.FLIP_RATE, SIM.FLIP_EASE, dt);
     } else {
-      st.angVel = damp(st.angVel, 0, SIM.RELEASE_DAMP, dt);
-      st.angVel += (hover ? SIM.HOVER_LEVEL : SIM.AUTO_LEVEL) * wrapAngle(under - st.angle) * dt;
+      st.angVel = damp(st.angVel, this._assistRate(under, hover), SIM.RELEASE_DAMP, dt);
     }
     st.angle += st.angVel * dt;
 
@@ -493,6 +501,25 @@ export class RiderSim {
     if (!ch && st.y >= this._surf(st.x)) this._land(ev);
   }
 
+  /**
+   * Target angular velocity while the button is up in the air (see SIM.ASSIST_*).
+   * d = back-rotation relative to the slope below; k whole flips + phase phi in [0, 2π).
+   */
+  _assistRate(under, hover) {
+    const d = under - this.state.angle;
+    const k = Math.floor(d / TAU);
+    const phi = d - k * TAU;
+    let target;
+    let cap = SIM.ASSIST_RATE;
+    if (hover) target = Math.round(d / TAU) * TAU;
+    else if (phi <= SIM.ASSIST_ROLLBACK) target = k * TAU;
+    else if (phi >= TAU - SIM.ASSIST_FINISH) {
+      target = (k + 1) * TAU;
+      cap = Math.max(cap, Math.min(SIM.FLIP_RATE, Math.abs(this.state.angVel))); // momentum carries the flip home
+    } else return 0; // committed: no rescue
+    return clamp(SIM.ASSIST_GAIN * (d - target), -cap, cap);
+  }
+
   _land(ev) {
     const st = this.state;
     const p = this._p;
@@ -504,7 +531,10 @@ export class RiderSim {
     const vn = -st.vx * Math.sin(th) + st.vy * Math.cos(th);
     const impact = clamp(vn / SIM.IMPACT_REF, 0, 1);
     st.y = this._surf(st.x);
-    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= SIM.LAND_CLEAN_ANGLE;
+    // Touching down while still spinning hard (button held) = "you were still flipping".
+    const spinning = this._p.holdT > SIM.SPIN_LAND_HOLD && Math.abs(st.angVel) > SIM.SPIN_LAND_RATE;
+    const tol = spinning ? SIM.SPIN_LAND_ANGLE : SIM.LAND_CLEAN_ANGLE;
+    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= tol;
     if (!clean) {
       ev.push({ type: SimEvent.LAND, data: { clean: false, impact } });
       this._crash('landing', ev);
@@ -581,7 +611,7 @@ export class RiderSim {
     const M = this._mult();
     let a = GRAVITY * Math.sin(th) - ((DRAG_K * (ice ? SIM.ICE_DRAG_MULT : SIM.GRIND_DRAG_MULT)) / (M * M)) * p.s * p.s;
     if (p.s < 1.15 * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
-    if (st.boostT > 0 && p.s < M * REF_SPEED) a += SIM.BOOST_PUSH * this._boostFrac();
+    if (st.boostT > 0 && p.s < M * REF_SPEED) a += this._boostPush();
     if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
     p.s = clamp(p.s + a * dt, 40, SIM.MAX_GROUND_SPEED);
     const dx = p.s * Math.cos(th) * dt;

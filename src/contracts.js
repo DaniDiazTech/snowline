@@ -46,6 +46,9 @@ export const FeatureType = Object.freeze({
   GRIND: 'grind',
   PICKUP: 'pickup',
   CAMPFIRE: 'campfire',
+  LOG: 'log', // fallen tree trunk lying across the slope: low and wide ({x, w, h})
+  SNOWMAN: 'snowman', // tall and narrow ({x, w, h})
+  SPIKES: 'spikes', // a row of ice shards: very low, long ({x, w, h})
 });
 
 /** @enum {string} */
@@ -62,9 +65,9 @@ export const SimEvent = Object.freeze({
   BOOST: 'boost', // { level:1|2|3, duration:number(s) }
   GRIND_START: 'grindStart', // { featureId, kind }
   GRIND_END: 'grindEnd', // { featureId, length:number(px) }
-  ROCK_SMASH: 'rockSmash', // { featureId, x, y }
+  ROCK_SMASH: 'rockSmash', // { featureId, x, y }  any solid obstacle smashed while shielded (look up the feature for its type)
   PICKUP: 'pickup', // { featureId, kind, x, y }
-  CRASH: 'crash', // { cause:'rock'|'landing'|'chasm'|'campfire', x, y }
+  CRASH: 'crash', // { cause:'rock'|'landing'|'chasm'|'campfire'|'log'|'snowman'|'spikes', x, y }
   RESPAWN: 'respawn', // { x, y }
   CHASM_CLEAR: 'chasmClear', // { featureId }
   FINISH: 'finish', // { tick:number, timeMs:number }
@@ -116,6 +119,8 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
  * @property {number} [sag]    grind: mid-span sag in px (bunting hangs, roofs/ice = 0)
  * @property {string} [kind]   GrindKind | PickupKind
  * @property {number} [size]   rock: radius in px (≈14..30); campfire: radius
+ * @property {number} [w]      log / snowman / spikes: full width in px, centred on x
+ * @property {number} [h]      log / snowman / spikes: height above the snow in px
  * @property {number} [variant] integer for visual variety (renderer may use it freely)
  */
 

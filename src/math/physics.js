@@ -11,16 +11,16 @@
  * Units: world px, seconds. y grows DOWN.
  */
 
-/** Gravity, px/s². With JUMP_VY this gives a ~0.85 s tap jump on any constant slope. */
+/** Gravity, px/s². With JUMP_VY this gives a ~0.85 s tap jump (measured with drag on rolling terrain) on any constant slope. */
 export const GRAVITY = 1200;
 
 /**
  * Vertical take-off impulse of a jump, px/s (applied as vy -= JUMP_VY).
  * On a constant slope the airtime of a vertical impulse is 2·JUMP_VY/GRAVITY
- * whatever the slope angle (0.85 s), and the highest point above the snow is
- * JUMP_VY²/(2·GRAVITY) ≈ 108 px (4.5 m), so grind lines 55-90 px high are reachable.
+ * whatever the slope angle (0.92 s, ≈0.84 s with drag), and the highest point above the snow is
+ * JUMP_VY²/(2·GRAVITY) ≈ 126 px (5.2 m), so grind lines 55-90 px high are reachable.
  */
-export const JUMP_VY = 510;
+export const JUMP_VY = 550;
 
 /**
  * Reference slope (dy/dx) at which an unboosted rider cruises at REF_SPEED.

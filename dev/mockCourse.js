@@ -46,15 +46,26 @@ export function generateMockCourse(seed = 1, settings = DEFAULT_SETTINGS) {
 
   // Lay out features.
   let x = 1400;
-  const kinds = ['rock', 'decorRun', 'grind', 'pickup', 'chasm', 'ramp', 'campfire', 'roof', 'ice', 'decorRun', 'rock', 'pickup'];
+  const kinds = ['rock', 'log', 'grind', 'pickup', 'chasm', 'snowman', 'ramp', 'campfire', 'spikes', 'roof', 'ice', 'chasm', 'log', 'snowman', 'rock', 'pickup', 'chasm', 'spikes'];
+  let chasmN = 0;
   let k = 0;
   while (x < finishX - 1500) {
     const kind = kinds[k++ % kinds.length];
     if (kind === 'rock') {
       features.push({ id: id++, type: FeatureType.ROCK, x, size: 14 + rnd.range(0, 16), variant: rnd.int(0, 3) });
       x += 700;
+    } else if (kind === 'log') {
+      features.push({ id: id++, type: FeatureType.LOG, x, w: 70 + rnd.range(0, 40), h: 18 + rnd.range(0, 6), variant: rnd.int(0, 3) });
+      x += 700;
+    } else if (kind === 'snowman') {
+      features.push({ id: id++, type: FeatureType.SNOWMAN, x, w: 30, h: 52 + rnd.range(0, 8), variant: rnd.int(0, 3) });
+      x += 700;
+    } else if (kind === 'spikes') {
+      features.push({ id: id++, type: FeatureType.SPIKES, x, w: 120 + rnd.range(0, 80), h: 12, variant: rnd.int(0, 3) });
+      x += 750;
     } else if (kind === 'chasm') {
-      const w = 220 + rnd.range(0, 160);
+      // narrow crevasse / medium / wide gorge in turn
+      const w = [90, 220, 420][chasmN++ % 3] + rnd.range(0, 30);
       ramps.push({ x: x - 40, len: 260, h: 34 });
       chasms.push({ x0: x, x1: x + w });
       features.push({ id: id++, type: FeatureType.RAMP, x: x - 40, variant: 0 });

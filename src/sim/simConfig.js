@@ -24,12 +24,23 @@ export const SIM = Object.freeze({
 
   /* ---- air ---- */
   AIR_DRAG_MULT: 1.0, // air drag relative to ground drag (1 = jumping neither gains nor loses cruise speed)
-  FLIP_RATE: (Math.PI * 2) / 0.55, // rad/s while held (≈0.55 s per 360°)
-  FLIP_EASE: 16, // ease-in sharpness toward FLIP_RATE (1/s)
-  RELEASE_DAMP: 20, // angular velocity damping after release (1/s); overshoot ≈ rate/damp
-  AUTO_LEVEL: 3.5, // gentle torque toward the slope below when not holding (1/s²)
+  FLIP_RATE: (Math.PI * 2) / 0.62, // rad/s while held (≈0.62 s per 360°)
+  FLIP_EASE: 16, // ease-in sharpness toward FLIP_RATE (1/s): a < 0.12 s tap barely rotates
+  // Release assist (button up in the air). Rotation is measured as the back-rotation past the
+  // last slope-aligned upright orientation (0..360°):
+  //   ≤ ASSIST_ROLLBACK      → roll back to upright (a short tap or slight over-rotation is forgiven)
+  //   ≥ 360° − ASSIST_FINISH → finish the flip forward (it counts)
+  //   in between             → "committed": no rescue, the spin just damps out
+  ASSIST_ROLLBACK: (110 * Math.PI) / 180,
+  ASSIST_FINISH: (160 * Math.PI) / 180,
+  ASSIST_RATE: (400 * Math.PI) / 180, // max assisted spin rate (rad/s)
+  ASSIST_GAIN: 9, // assisted spin rate per rad of remaining error (1/s)
+  RELEASE_DAMP: 22, // how fast angular velocity converges to the assisted rate after release (1/s)
   FLIP_COUNT_TOL: 0.35, // rad: a flip counts once rotation reaches 2π - this
   LAND_CLEAN_ANGLE: (50 * Math.PI) / 180, // max |board - slope| for a clean landing
+  SPIN_LAND_HOLD: 0.2, // s: touching down after holding longer than this...
+  SPIN_LAND_RATE: 6, // rad/s: ...while still spinning faster than this...
+  SPIN_LAND_ANGLE: (25 * Math.PI) / 180, // ...only lands within this angle
   LAND_LOSS: 0.06, // fraction of speed lost at impact 1 on a clean landing
   SLOPPY_LOSS: 0.12, // extra loss for landings at the edge of the clean window
   IMPACT_REF: 900, // normal speed (px/s) that maps to impact = 1
@@ -70,19 +81,20 @@ export const SIM = Object.freeze({
 
   /* ---- speed rewards ---- */
   BOOST_TIERS: Object.freeze([
-    Object.freeze({ min: 10, bonus: 0.18, duration: 2.0 }),
-    Object.freeze({ min: 60, bonus: 0.32, duration: 2.8 }),
-    Object.freeze({ min: 200, bonus: 0.5, duration: 3.8 }),
+    Object.freeze({ min: 10, bonus: 0.12, duration: 1.8 }),
+    Object.freeze({ min: 60, bonus: 0.36, duration: 3.0 }),
+    Object.freeze({ min: 200, bonus: 0.58, duration: 4.0 }),
   ]),
   BOOST_FULL_FRAC: 0.3, // boost runs at full power for this fraction, then fades smoothly
-  BOOST_PUSH: 130, // px/s² extra push while below the boosted cruise speed of the local slope
+  BOOST_PUSH: 560, // px/s² of extra push per +100% tier bonus, while below the boosted cruise speed
   BOOST_EXTEND: 0.35, // re-banking adds this fraction of the overlap
   BOOST_MAX_T: 6, // s cap
   SHIELD_FRAC: 0.6, // shield during the first 60% of a boost
+  MAX_SPEED_MULT: 1.62, // cap on scarf × boost cruise multiplier (keeps long tier-3 chains readable)
   SCARF_SPEED_BONUS: 0.12, // full scarf raises terminal speed by 20%
-  SCARF_PER_POINT: 0.002, // scarf gained per banked combo point (total)
+  SCARF_PER_POINT: 0.009, // scarf gained per banked combo point (total)
   SCARF_MAX_GAIN: 0.25, // per bank
-  SCARF_DECAY: 0.03, // per second
+  SCARF_DECAY: 0.045, // per second
   SCARF_PER_COIN: 0.006,
 
   /* ---- pickups ---- */
@@ -92,7 +104,6 @@ export const SIM = Object.freeze({
   MAGNET_T: 8,
   HOVER_HEIGHT: 12, // px above the snow while hovering
   HOVER_GRAVITY: 0.6, // gravity multiplier in the air while hovering
-  HOVER_LEVEL: 14, // strong auto-level while hovering (1/s²)
 
   /* ---- finish ---- */
   FINISH_BRAKE: 280, // px/s² once across the line
