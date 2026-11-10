@@ -253,7 +253,9 @@ export class HudView {
     }
     // keep a little above the rider and inside the viewport
     const px = Math.max(90, Math.min(innerWidth - 90, x));
-    const py = Math.max(140, Math.min(innerHeight - 60, y - 70));
+    // When the rider is high on screen (big air, short phones) the toast goes below it instead of on top of it.
+    const top = innerHeight < 500 ? 96 : 140;
+    const py = Math.min(innerHeight - 60, y - 70 >= top ? y - 70 : Math.max(top, y + 56));
     const l = `${Math.round(px)}px`;
     const t = `${Math.round(py)}px`;
     if (st.left !== l) st.left = l;

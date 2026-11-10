@@ -1,4 +1,4 @@
-import { clamp, lerp, makeNoiseBuffer, makeImpulse, mulberry32 } from './dsp.js';
+import { clamp, lerp, makeNoiseBuffer, makeImpulse, mulberry32, seedRandom } from './dsp.js';
 import { Music } from './Music.js';
 import { Layers } from './Layers.js';
 import { Sfx } from './Sfx.js';
@@ -27,7 +27,7 @@ export class AudioEngine {
   constructor(opts = {}) {
     this.muted = !!opts.muted;
     this.seed = opts.seed ?? 20241;
-    this.speedRef = opts.speedRef ?? 1300;
+    this.speedRef = opts.speedRef ?? 1000;
     this.ctx = null;
     this.ready = false;
     this._pendingMood = null;
@@ -62,6 +62,7 @@ export class AudioEngine {
 
   _init(ctx) {
     this.ctx = ctx;
+    seedRandom(this.seed);
     const rng = mulberry32(this.seed);
     this.noise = {
       white: makeNoiseBuffer(ctx, 3, 'white'),
@@ -82,6 +83,7 @@ export class AudioEngine {
     const n = 1024, curve = new Float32Array(n);
     for (let i = 0; i < n; i++) curve[i] = Math.tanh(((i / (n - 1)) * 2 - 1) * 1.1) * 0.9;
     clip.curve = curve;
+    this.comp = comp; this.lim = lim; this.clip = clip;
     this.master.connect(comp); comp.connect(lim); lim.connect(clip); clip.connect(ctx.destination);
 
     // reverb
@@ -95,7 +97,7 @@ export class AudioEngine {
 
     // music chain
     this.musicIn = ctx.createGain();
-    this.musicIn.gain.value = 0.45;
+    this.musicIn.gain.value = 0.7;
     this.musicFilter = ctx.createBiquadFilter();
     this.musicFilter.type = 'lowpass';
     this.musicFilter.Q.value = 0.5;
@@ -111,7 +113,7 @@ export class AudioEngine {
 
     // sfx + layers
     this.sfxBus = ctx.createGain();
-    this.sfxBus.gain.value = 1.5;
+    this.sfxBus.gain.value = 0.9;
     this.sfxBus.connect(this.master);
     const sfxWet = ctx.createGain();
     sfxWet.gain.value = 0.35;

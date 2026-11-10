@@ -1,11 +1,11 @@
-import { clamp } from './dsp.js';
+import { clamp, rand } from './dsp.js';
 
 /**
  * Continuous, per-frame driven layers: board carve hiss, wind, weather beds
  * and thunder. All sources are long-lived looping noise (created once).
  */
 export class Layers {
-  constructor(ctx, out, noises, speedRef = 1300) {
+  constructor(ctx, out, noises, speedRef = 1000) {
     this.ctx = ctx;
     this.out = out;
     this.noises = noises;
@@ -20,7 +20,7 @@ export class Layers {
       const s = ctx.createBufferSource();
       s.buffer = buf;
       s.loop = true;
-      s.start(0, Math.random() * 2);
+      s.start(0, rand() * 2);
       return s;
     };
     const filt = (type, f, q = 0.7) => {
@@ -84,7 +84,12 @@ export class Layers {
   }
 
   update(view) {
-    const sp = clamp((view.speed || 0) / this.speedRef, 0, 1.3);
+    // Game speeds: cruise ~460-500 px/s, boosted 650-800, long boosted drops up to ~1400.
+    // `sp` is speed / speedRef (1 = 1000 px/s); loudness saturates (sat) so peaks never blow up,
+    // spectral brightness is clamped at sp = 1 so very high speeds do not turn into harsh hiss.
+    const sp = clamp((view.speed || 0) / this.speedRef, 0, 1.5);
+    const sat = sp / (sp + 0.5); // 0.49 at cruise, 0.59 boosted, 0.74 at 1400 px/s
+    const spf = Math.min(sp, 1);
     const mode = view.mode;
     const grind = mode === 'grind';
     const ground = mode === 'ground' || mode === 'finished' || grind;
@@ -92,16 +97,16 @@ export class Layers {
     const amt = clamp(view.weatherAmt || 0, 0, 1);
     const w = view.weather;
 
-    const carve = ground ? (0.05 + 0.2 * Math.pow(sp, 1.3)) * (grind ? 0.55 : 1) : 0;
+    const carve = ground ? (0.04 + 0.22 * sat) * (grind ? 0.55 : 1) : 0;
     this._set('carve', this.carveG.gain, carve, ground ? 0.08 : 0.04);
-    this._set('carveF', this.carveF.frequency, 500 + 3000 * sp + (grind ? 800 : 0), 0.1);
-    this._set('zing', this.zingG.gain, grind ? 0.05 + 0.1 * sp : 0, 0.05);
-    this._set('zingF', this.zingF.frequency, 3200 + 1800 * sp, 0.1);
-    this._set('rumble', this.rumbleG.gain, ground && !grind ? 0.12 * sp : 0, 0.15);
+    this._set('carveF', this.carveF.frequency, 600 + 1900 * spf + (grind ? 600 : 0), 0.1);
+    this._set('zing', this.zingG.gain, grind ? 0.04 + 0.08 * sat : 0, 0.05);
+    this._set('zingF', this.zingF.frequency, 3200 + 1200 * spf, 0.1);
+    this._set('rumble', this.rumbleG.gain, ground && !grind ? 0.14 * sat : 0, 0.15);
 
-    const wind = 0.03 + 0.2 * Math.pow(sp, 1.2) + (air ? 0.07 : 0) + (w === 'storm' ? 0.05 * amt : 0);
+    const wind = 0.03 + 0.2 * sat + (air ? 0.05 : 0) + (w === 'storm' ? 0.05 * amt : 0);
     this._set('wind', this.windG.gain, wind, 0.25);
-    this._set('windF', this.windF.frequency, 350 + 1500 * sp + (air ? 400 : 0), 0.25);
+    this._set('windF', this.windF.frequency, 350 + 1200 * spf + (air ? 300 : 0), 0.25);
 
     this._set('snow', this.snowG.gain, w === 'snow' ? 0.05 * amt : w === 'storm' ? 0.07 * amt : 0, 0.4);
     this._set('rain', this.rainG.gain, w === 'storm' ? 0.1 * amt : 0, 0.4);
@@ -111,7 +116,7 @@ export class Layers {
     const now = this.ctx.currentTime;
     if (flash > 0.5 && this.lastFlash <= 0.5 && now - this.lastThunder > 7 && this.onThunder) {
       this.lastThunder = now;
-      this.onThunder(now + 0.35 + Math.random() * 1.2);
+      this.onThunder(now + 0.35 + rand() * 1.2);
     }
     this.lastFlash = flash;
   }

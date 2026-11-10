@@ -1,4 +1,4 @@
-import { mtof, clamp } from './dsp.js';
+import { mtof, clamp, rand } from './dsp.js';
 
 /**
  * Generative ambient music: felt-piano plucks + warm pads over a slow
@@ -285,7 +285,7 @@ export class Music {
     g.gain.exponentialRampToValueAtTime(level, t + 0.005);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
     src.connect(f); f.connect(g); g.connect(this.bus);
-    src.start(t, Math.random() * 2); src.stop(t + 0.1);
+    src.start(t, rand() * 2); src.stop(t + 0.1);
     src.onended = () => { try { g.disconnect(); f.disconnect(); } catch (e) { /* ignore */ } };
   }
 }

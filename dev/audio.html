@@ -112,6 +112,67 @@ window.renderMood = (mood, seconds = 10, view = null) => window.renderOffline(se
 window.renderEvent = (type, data, seconds = 3) => window.renderOffline(seconds, (e) => e.onSimEvent({ type, data }));
 window.renderUi = (name, seconds = 3) => window.renderOffline(seconds, (e) => e.ui(name));
 window.renderView = (view, seconds = 4) => window.renderOffline(seconds, (e) => e.update(view));
+
+/**
+ * Scenario renderer used by snowline-tests/audio/mix-qa.mjs.
+ * spec: { seconds, mood|null, layers:bool, sfx:bool, step, views:[{t,view}], events:[{t,type,data}|{t,ui}], track:bool, opts }
+ * The game loop is emulated with OfflineAudioContext.suspend(): at every `step` seconds the latest view
+ * keyframe is passed to update(), due events are fired and the music scheduler is pumped.
+ */
+window.renderScenario = async (spec) => {
+  const sr = 44100, N = Math.ceil(spec.seconds * sr);
+  const ctx = new OfflineAudioContext(2, N, sr);
+  const live = { osc: 0, src: 0 };
+  if (spec.track) {
+    for (const [fn, key] of [['createOscillator', 'osc'], ['createBufferSource', 'src']]) {
+      const orig = ctx[fn].bind(ctx);
+      ctx[fn] = () => { const n = orig(); live[key]++; n.addEventListener('ended', () => { live[key]--; }); return n; };
+    }
+  }
+  const e = AudioEngine.forContext(ctx, spec.opts || {});
+  const notes = { pluck: [], bass: [], pad: [] };
+  const m = e.music;
+  for (const [name, rec] of [['_pluck', (a) => notes.pluck.push(a[0])], ['_bass', (a) => notes.bass.push(a[0])], ['_pad', (a) => notes.pad.push(...a[0].pad)]]) {
+    const orig = m[name].bind(m);
+    m[name] = (...a) => { rec(a); return orig(...a); };
+  }
+  if (!spec.layers) e.layerBus.gain.value = 0;
+  if (!spec.sfx) e.sfxBus.gain.value = 0;
+  if (spec.mood) e.startMusic(spec.mood);
+  const views = (spec.views || []).slice().sort((a, b) => a.t - b.t);
+  const events = (spec.events || []).slice().sort((a, b) => a.t - b.t);
+  let ei = 0;
+  const fired = [], samples = [];
+  const tick = () => {
+    const t = ctx.currentTime;
+    let v = null;
+    for (const k of views) if (k.t <= t + 1e-9) v = k.view; else break;
+    if (v) e.update(v);
+    while (ei < events.length && events[ei].t <= t + 1e-9) {
+      const ev = events[ei++];
+      if (spec.sfx) { if (ev.ui) e.ui(ev.ui); else e.onSimEvent({ type: ev.type, data: ev.data }); }
+      fired.push({ t: t + 0.005, key: ev.ui ? 'ui:' + ev.ui : ev.type + (ev.data && ev.data.kind ? ':' + ev.data.kind : ev.data && ev.data.level ? ':' + ev.data.level : ''), id: ev.id });
+    }
+    e.music.scheduleUntil(t + 1.0);
+    if (spec.track) samples.push({ t, osc: live.osc, src: live.src, sfx: e.sfx.v.active });
+  };
+  tick();
+  const step = spec.step || 0.1;
+  for (let k = 1; k * step < spec.seconds - 0.2; k++) {
+    ctx.suspend(k * step).then(() => { tick(); ctx.resume(); });
+  }
+  const buf = await ctx.startRendering();
+  const enc = (d) => { let s = ''; const u = new Uint8Array(d.buffer, d.byteOffset, d.byteLength); for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+  const out = { sr, fired, notes, samples };
+  if (spec.raw !== false) { out.L = enc(buf.getChannelData(0)); out.R = enc(buf.getChannelData(1)); }
+  else {
+    // compact per-second RMS for long leak runs
+    const d = buf.getChannelData(0), r = [];
+    for (let i = 0; i + sr <= d.length; i += sr) { let a = 0; for (let j = 0; j < sr; j++) a += d[i + j] * d[i + j]; r.push(Math.sqrt(a / sr)); }
+    out.rmsPerSec = r;
+  }
+  return out;
+};
 </script>
 </body>
 </html>

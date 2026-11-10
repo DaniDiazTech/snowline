@@ -17,6 +17,11 @@ export function mulberry32(seed) {
   };
 }
 
+/** Module-level seeded random (reproducible noise, offsets and jitter). Reseeded by AudioEngine. */
+let _rand = null;
+export function seedRandom(seed) { _rand = mulberry32(seed); }
+export const rand = () => (_rand || (_rand = mulberry32(1))) ();
+
 /** Mono noise buffer: 'white' | 'pink' | 'brown'. Built once and reused everywhere. */
 export function makeNoiseBuffer(ctx, seconds = 4, kind = 'white') {
   const len = Math.floor(ctx.sampleRate * seconds);
@@ -24,7 +29,7 @@ export function makeNoiseBuffer(ctx, seconds = 4, kind = 'white') {
   const d = buf.getChannelData(0);
   let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, last = 0;
   for (let i = 0; i < len; i++) {
-    const w = Math.random() * 2 - 1;
+    const w = rand() * 2 - 1;
     if (kind === 'pink') {
       b0 = 0.99886 * b0 + w * 0.0555179;
       b1 = 0.99332 * b1 + w * 0.0750759;
