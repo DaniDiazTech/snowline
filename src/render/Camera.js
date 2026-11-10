@@ -71,6 +71,11 @@ export class Camera {
     return Math.max(frac * short, MIN_RIDER_PX) / RIDER_HEIGHT;
   }
 
+  /** Short zoom-out pulse (boost hit): rises instantly, eases out over ~0.25 s, adds a little lead. */
+  kick(amount) {
+    this.kickAmt = Math.max(this.kickAmt || 0, amount);
+  }
+
   addShake(amount) {
     this.shakeAmp = Math.min(14, Math.max(this.shakeAmp, amount));
   }
@@ -179,10 +184,15 @@ export class Camera {
       this.y = damp(this.y, ty, followY, dt);
       this.targetScale = damp(this.targetScale, scaleT, followS, dt);
     }
+    this.kickAmt = (this.kickAmt || 0) * Math.exp(-dt / 0.25);
+    if (this.kickAmt < 0.001) this.kickAmt = 0;
     this.prevRiderX = rider.x;
     this.prevTy = ty;
     this.zoom = this.targetScale / this.baseScale;
-    this.scale = this.targetScale * this.debugZoom;
+    const kick = this.kickAmt || 0;
+    this.scale = this.targetScale * (1 - kick) * this.debugZoom;
+    // the pulse also leans the frame forward a touch (rider drifts left)
+    this.anchorX -= kick * this.width * 0.6;
 
     // Shake: small deterministic wobble decaying quickly.
     this.shakeAmp = damp(this.shakeAmp, 0, 7, dt);

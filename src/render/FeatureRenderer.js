@@ -25,6 +25,15 @@ export class FeatureRenderer {
       case FeatureType.ROCK:
         if (!consumed.has(f.id)) this.rock(ctx, f, P, course);
         break;
+      case FeatureType.LOG:
+        if (!consumed.has(f.id)) log(ctx, f, P, course);
+        break;
+      case FeatureType.SNOWMAN:
+        if (!consumed.has(f.id)) snowman(ctx, f, P, course);
+        break;
+      case FeatureType.SPIKES:
+        if (!consumed.has(f.id)) spikes(ctx, f, P, course);
+        break;
       case FeatureType.RAMP:
         ramp(ctx, f, P, course);
         break;
@@ -53,6 +62,7 @@ export class FeatureRenderer {
     const shape = this.rockShapes[((f.variant | 0) % 4 + 4) % 4];
     const y = course.heightAt(f.x);
     const ang = Math.atan(course.slopeAt(f.x));
+    contactShadow(ctx, f.x, y, r * 1.5, P);
     ctx.save();
     ctx.translate(f.x, y + r * 0.28);
     ctx.rotate(ang * 0.6);
@@ -509,4 +519,227 @@ export function sparkle(ctx, x, y, r, a) {
   ctx.quadraticCurveTo(x, y, x - r, y);
   ctx.quadraticCurveTo(x, y, x, y - r);
   ctx.fill();
+}
+
+/* ---------------- solid obstacles: log / snowman / spikes ---------------- */
+
+/** Soft elongated shadow where an obstacle meets the snow (reads on white snow in every palette). */
+function contactShadow(ctx, x, y, halfW, P) {
+  const g = ctx.createRadialGradient(x, y + 1, 0, x, y + 1, halfW);
+  const c = P.shadeDeep;
+  g.addColorStop(0, rgba(c, 0.38));
+  g.addColorStop(1, rgba(c, 0));
+  ctx.save();
+  ctx.translate(x, y + 1);
+  ctx.scale(1, 0.16);
+  ctx.translate(-x, -(y + 1));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y + 1, halfW, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+function log(ctx, f, P, course) {
+  const w = f.w || 90;
+  const h = f.h || 20;
+  const y = course.heightAt(f.x);
+  const ang = Math.atan2(course.heightAt(f.x + w / 2) - course.heightAt(f.x - w / 2), w);
+  contactShadow(ctx, f.x, y, w * 0.62, P);
+  const bark = P.bark;
+  const barkDark = mix(bark, P.sil, 0.45);
+  const barkLit = mix(bark, P.snow, 0.18);
+  const wood = P.wood;
+  const r = h / 2;
+  ctx.save();
+  ctx.translate(f.x, y + 2);
+  ctx.rotate(ang);
+  // trunk body
+  ctx.fillStyle = rgba(bark);
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h, w, h, [r * 0.5, r * 0.3, r * 0.3, r * 0.5]);
+  ctx.fill();
+  // lower shadow facet + lit upper facet
+  ctx.fillStyle = rgba(barkDark);
+  ctx.fillRect(-w / 2 + 2, -h * 0.42, w - 4, h * 0.42);
+  ctx.fillStyle = rgba(barkLit);
+  ctx.fillRect(-w / 2 + 3, -h * 0.86, w - 8, h * 0.18);
+  // bark grooves
+  ctx.strokeStyle = rgba(barkDark, 0.8);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const gy = -h * (0.25 + i * 0.17);
+    const x0 = -w / 2 + 6 + hash01(f.id, i) * 12;
+    ctx.moveTo(x0, gy);
+    ctx.lineTo(x0 + w * (0.35 + 0.3 * hash01(f.id, i + 9)), gy + (i % 2 ? 0.8 : -0.8));
+  }
+  ctx.stroke();
+  // broken branch stubs
+  ctx.fillStyle = rgba(bark);
+  for (let i = 0; i < 2; i++) {
+    const bx = -w * 0.25 + i * w * 0.42 + hash01(f.id, 20 + i) * 8;
+    ctx.beginPath();
+    ctx.moveTo(bx - 3, -h + 1);
+    ctx.lineTo(bx + 4 + i * 2, -h - 7 - i * 3);
+    ctx.lineTo(bx + 7 + i * 2, -h - 6 - i * 3);
+    ctx.lineTo(bx + 4, -h + 1);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // cut end (downhill side) with rings
+  const ex = w / 2 - r * 0.25;
+  ctx.fillStyle = rgba(wood);
+  ctx.beginPath();
+  ctx.ellipse(ex, -r, r * 0.42, r * 0.96, 0, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = rgba(mix(wood, bark, 0.55));
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.ellipse(ex, -r, r * 0.27, r * 0.62, 0, 0, TAU);
+  ctx.moveTo(ex + r * 0.12, -r);
+  ctx.ellipse(ex, -r, r * 0.12, r * 0.3, 0, 0, TAU);
+  ctx.stroke();
+  // snow cap along the top
+  ctx.fillStyle = rgba(P.snow);
+  ctx.beginPath();
+  ctx.moveTo(-w / 2 + 2, -h + 1);
+  ctx.quadraticCurveTo(-w / 2 + 4, -h - 4, -w / 2 + 12, -h - 3.5);
+  ctx.lineTo(w / 2 - 14, -h - 3);
+  ctx.quadraticCurveTo(w / 2 - 6, -h - 3, w / 2 - 5, -h + 1.5);
+  for (let i = 8; i >= 0; i--) {
+    const u = i / 8;
+    ctx.lineTo(-w / 2 + 4 + (w - 10) * u, -h + 2 + (i % 2 ? 2.5 : 0.5));
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function snowman(ctx, f, P, course) {
+  const h = f.h || 56;
+  const y = course.heightAt(f.x);
+  const r1 = h * 0.21;
+  const r2 = h * 0.165;
+  const r3 = h * 0.125;
+  const x = f.x;
+  contactShadow(ctx, x + 3, y, r1 * 1.9, P);
+  const lit = mix(P.snow, [255, 255, 255], 0.35);
+  const shade = mix(P.snow, P.shadeDeep, 0.55);
+  const balls = [
+    [x, y - r1 + 2, r1],
+    [x + 0.5, y - 2 * r1 - r2 + 5, r2],
+    [x + 1, y - 2 * r1 - 2 * r2 - r3 + 8, r3],
+  ];
+  for (const [bx, by, br] of balls) {
+    const g = ctx.createLinearGradient(bx - br, by - br, bx + br, by + br);
+    g.addColorStop(0, rgba(lit));
+    g.addColorStop(0.55, rgba(mix(lit, shade, 0.35)));
+    g.addColorStop(1, rgba(shade));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(bx, by, br, 0, TAU);
+    ctx.fill();
+  }
+  const [hx, hy, hr] = balls[2];
+  const [mx, my, mr] = balls[1];
+  const dark = rgba(P.sil);
+  // twig arms
+  ctx.strokeStyle = dark;
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(mx - mr * 0.8, my - 2);
+  ctx.lineTo(mx - mr * 2.1, my - mr * 0.9);
+  ctx.moveTo(mx - mr * 1.6, my - mr * 0.6);
+  ctx.lineTo(mx - mr * 1.9, my - mr * 1.3);
+  ctx.moveTo(mx + mr * 0.8, my - 2);
+  ctx.lineTo(mx + mr * 2.0, my - mr * 1.4 + Math.sin(P.t * 2 + f.id) * 1.2);
+  ctx.moveTo(mx + mr * 1.5, my - mr * 1.0);
+  ctx.lineTo(mx + mr * 1.9, my - mr * 0.6);
+  ctx.stroke();
+  // tiny scarf (festive colour) with a tail
+  ctx.fillStyle = rgba(P.festive[(f.variant | 0) % 2 === 0 ? 0 : 3]);
+  ctx.fillRect(hx - hr * 0.95, hy + hr * 0.62, hr * 1.95, hr * 0.42);
+  ctx.beginPath();
+  ctx.moveTo(hx - hr * 0.4, hy + hr * 0.9);
+  ctx.lineTo(hx - hr * 0.95, hy + hr * 1.9 + Math.sin(P.t * 4 + f.id) * 1.5);
+  ctx.lineTo(hx - hr * 0.4, hy + hr * 1.75);
+  ctx.closePath();
+  ctx.fill();
+  // top hat
+  ctx.fillStyle = dark;
+  ctx.fillRect(hx - hr * 1.0, hy - hr * 0.95, hr * 2.0, hr * 0.28);
+  ctx.fillRect(hx - hr * 0.62, hy - hr * 2.0, hr * 1.24, hr * 1.1);
+  // face: eyes + carrot nose
+  ctx.beginPath();
+  ctx.arc(hx + hr * 0.15, hy - hr * 0.2, 1.1, 0, TAU);
+  ctx.arc(hx + hr * 0.6, hy - hr * 0.2, 1.1, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = rgba(mix([240, 130, 40], P.sil, 0.15 + 0.3 * P.night));
+  ctx.beginPath();
+  ctx.moveTo(hx + hr * 0.45, hy + hr * 0.05);
+  ctx.lineTo(hx + hr * 1.55, hy + hr * 0.2);
+  ctx.lineTo(hx + hr * 0.45, hy + hr * 0.35);
+  ctx.closePath();
+  ctx.fill();
+  // buttons
+  ctx.fillStyle = dark;
+  for (let i = 0; i < 2; i++) {
+    ctx.beginPath();
+    ctx.arc(mx + 1.5, my - mr * 0.3 + i * mr * 0.55, 1.2, 0, TAU);
+    ctx.fill();
+  }
+}
+
+function spikes(ctx, f, P, course) {
+  const w = f.w || 150;
+  const h = f.h || 12;
+  const x0 = f.x - w / 2;
+  contactShadow(ctx, f.x, course.heightAt(f.x), w * 0.55, P);
+  // saturated glacier blue so the row reads on white snow (day) and on blue snow (night)
+  const ice = mix(mix(P.snow, [95, 180, 235], 0.62), [255, 255, 255], 0.1);
+  const deep = mix(mix(ice, [30, 70, 120], 0.45), P.sil, 0.2 * P.night);
+  const n = Math.max(4, Math.round(w / 11));
+  const shards = [];
+  for (let i = 0; i < n; i++) {
+    const u = (i + 0.5) / n;
+    const x = x0 + w * u + (hash01(f.id, i) - 0.5) * 5;
+    const hh = h * (0.8 + 1.0 * hash01(f.id, i + 40)) * (0.8 + 0.5 * Math.sin(u * Math.PI));
+    const bw = 5 + 5 * hash01(f.id, i + 80);
+    const lean = (hash01(f.id, i + 120) - 0.5) * hh * 0.5;
+    shards.push([x, course.heightAt(x) + 2, hh, bw, lean]);
+  }
+  // back row (darker) then front row (paler, translucent)
+  for (const [pass, col, a] of [
+    [0, deep, 0.95],
+    [1, ice, 0.88],
+  ]) {
+    ctx.fillStyle = rgba(col, a);
+    ctx.beginPath();
+    for (let i = pass; i < shards.length; i += 2) {
+      const [x, gy, hh, bw, lean] = shards[i];
+      ctx.moveTo(x - bw / 2, gy);
+      ctx.lineTo(x + lean, gy - hh);
+      ctx.lineTo(x + bw / 2, gy);
+      ctx.closePath();
+    }
+    ctx.fill();
+  }
+  // bright rims on the lit (left) edges
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const [x, gy, hh, bw, lean] of shards) {
+    ctx.moveTo(x - bw / 2 + 1, gy - 1);
+    ctx.lineTo(x + lean, gy - hh);
+  }
+  ctx.stroke();
+  // travelling glint
+  const g = (P.t * 0.45 + f.id * 0.13) % 1.3;
+  if (g < 1) {
+    const k = Math.min(shards.length - 1, Math.floor(g * shards.length));
+    const [x, gy, hh, , lean] = shards[k];
+    sparkle(ctx, x + lean * 0.6, gy - hh * 0.7, 6, 0.95);
+  }
 }

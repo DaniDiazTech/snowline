@@ -35,6 +35,24 @@ export class RiderRenderer {
 
   reset() {
     this.scarves.clear();
+    this.flares = new Map();
+  }
+
+  /** Boost hit: the scarf flares long and bright for a moment. */
+  flare(id, level) {
+    if (!this.flares) this.flares = new Map();
+    this.flares.set(id, { amt: 0.4 + 0.2 * level, t: 0 });
+  }
+
+  flareOf(id, dt) {
+    const f = this.flares && this.flares.get(id);
+    if (!f) return 0;
+    f.amt *= Math.exp(-dt / 0.6);
+    if (f.amt < 0.01) {
+      this.flares.delete(id);
+      return 0;
+    }
+    return f.amt;
   }
 
   /** Drops scarf state of riders not drawn for a while. Call once per frame after drawing. */
@@ -140,7 +158,9 @@ export class RiderRenderer {
     const ny = v.y + (J.n.x * sa + J.n.y * ca) * K;
 
     const boost = v.boostLevel || 0;
-    const scarfCol = mix(mix(hex(v.color), P.sil, 0.12 + P.night * 0.2), [255, 255, 255], boost ? 0.12 + boost * 0.06 : 0);
+    const flare = this.flareOf(v.id, dt);
+    this.curFlare = flare;
+    const scarfCol = mix(mix(hex(v.color), P.sil, 0.12 + P.night * 0.2), [255, 255, 255], Math.min(0.7, (boost ? 0.12 + boost * 0.06 : 0) + flare * 0.6));
     const s = this.scarf(v, nx, ny, dt, t);
     this.t = t;
     this.flow = clamp(Math.hypot(v.vx, v.vy) / 1000, 0, 1.3);
@@ -162,7 +182,7 @@ export class RiderRenderer {
     if (boost && !ghost) P.glow(v.x - v.vx * 0.02, v.y - 22, 46 + boost * 10, 0.22 + boost * 0.1, hex(v.color));
 
     // scarf goes behind the body
-    this.drawScarf(ctx, s, scarfCol, ghost ? 0.75 : 1, boost, v);
+    this.drawScarf(ctx, s, scarfCol, ghost ? 0.75 : 1, boost + flare * 4, v);
 
     ctx.save();
     ctx.translate(v.x, v.y);
@@ -231,7 +251,7 @@ export class RiderRenderer {
     const amt = clamp(v.scarf ?? 0, 0, 1);
     // in calm air (start line) the scarf is a shorter, lighter streamer
     const calmL = Math.max(0, 1 - clamp(Math.hypot(v.vx, v.vy) / 900, 0, 1.4) * 2);
-    const L = lerp(2.0, 7.2, amt) * (1 - 0.4 * calmL);
+    const L = lerp(2.0, 7.2, amt) * (1 - 0.4 * calmL) * (1 + 0.6 * (this.curFlare || 0));
     if (!s || Math.hypot(ax - s.ax, ay - s.ay) > 260) {
       s = s || { px: new Float32Array(SEGMENTS), py: new Float32Array(SEGMENTS), ox: new Float32Array(SEGMENTS), oy: new Float32Array(SEGMENTS), acc: 0, seen: 0, ax, ay };
       // lay it out trailing behind the velocity, pre-moving so it starts streaming

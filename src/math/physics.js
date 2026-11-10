@@ -20,7 +20,7 @@ export const GRAVITY = 1200;
  * whatever the slope angle (0.92 s, ≈0.84 s with drag), and the highest point above the snow is
  * JUMP_VY²/(2·GRAVITY) ≈ 126 px (5.2 m), so grind lines 55-90 px high are reachable.
  */
-export const JUMP_VY = 550;
+export const JUMP_VY = 600;
 
 /**
  * Reference slope (dy/dx) at which an unboosted rider cruises at REF_SPEED.
@@ -28,8 +28,8 @@ export const JUMP_VY = 550;
  */
 export const REF_SLOPE = 0.165;
 
-/** Unboosted terminal speed on REF_SLOPE, px/s (≈21 m/s at PX_PER_M = 24). */
-export const REF_SPEED = 500;
+/** Unboosted terminal speed on REF_SLOPE, px/s (≈19 m/s at PX_PER_M = 24). */
+export const REF_SPEED = 460;
 
 /** Quadratic drag coefficient (1/px): a_drag = DRAG_K · v². */
 export const DRAG_K = (GRAVITY * Math.sin(Math.atan(REF_SLOPE))) / (REF_SPEED * REF_SPEED);
@@ -41,7 +41,7 @@ export function terminalSpeed(slope) {
 }
 
 /** Extra upward kick when a jump is taken on a ramp (kicker), px/s. */
-export const RAMP_POP = 170;
+export const RAMP_POP = 260;
 
 /** Height of the rider's body centre above the board contact point, px (pickups). */
 export const BODY_CENTER = 18;

@@ -194,15 +194,11 @@ export class Game {
     on('phase', (phase) => this.onRoomPhase(phase));
     on('status', (status) => this.ui.setConnection(status));
     on('closed', ({ reason }) => this.onRoomClosed(reason));
-    room.setDnfProvider(() => (this.race && !this.practice ? this.race.botDnfReports() : []));
+    room.setDnfProvider(() => (this.race && !this.practice && room.race?.raceId === this.raceId ? this.race.botDnfReports() : []));
     this.ui.setConnection(room.status ?? 'online');
     this.audio.ui('join');
     // Keep the invite in the address bar so the host can also just copy the URL.
-    try {
-      history.replaceState(null, '', room.shareUrl);
-    } catch {
-      /* file:// etc. */
-    }
+    this.setUrlRoom(room.code);
     this.showLobby();
   }
 
@@ -210,11 +206,24 @@ export class Game {
     for (const off of this.roomOff) off();
     this.roomOff = [];
     this.room = null;
+    this.setUrlRoom(null);
+  }
+
+  /** Puts ?room=CODE in the address bar (or removes it) without touching the other parameters. */
+  setUrlRoom(code) {
     try {
-      history.replaceState(null, '', location.pathname + (this.netOpts.net ? '?net=local' : ''));
+      const url = new URL(location.href);
+      if (code) url.searchParams.set('room', code);
+      else url.searchParams.delete('room');
+      history.replaceState(null, '', url);
     } catch {
-      /* ignore */
+      /* file:// etc. */
     }
+  }
+
+  /** The invite link. Offline (loopback) rooms only exist on the loopback transport. */
+  shareUrl() {
+    return this.room.shareUrl + (this.netOpts.net ? '&net=local' : '');
   }
 
   leave() {
@@ -245,6 +254,9 @@ export class Game {
       for (const p of players) {
         if (p.id !== this.room.selfId && this.race.remotes.has(p.id)) this.race.addRemote(p);
       }
+      // Riders who left or lost their connection stop being drawn and ranked.
+      for (const [id, remote] of this.race.remotes) remote.gone = !players.some((p) => p.id === id && p.connected);
+      if (this.staleRace()) return this.showLobby();
     }
     this.refreshLobby();
     if (this.lastResults && this.phase === Phase.RESULTS) this.pushResults();
@@ -252,16 +264,24 @@ export class Game {
 
   onRoomPhase(phase) {
     if (phase === Phase.LOBBY && this.phase !== Phase.LOBBY) this.showLobby();
+    else if (this.staleRace()) this.showLobby();
     else this.refreshLobby();
+  }
+
+  /** True when the race on screen is no longer the room's race (we were offline while it moved on). */
+  staleRace() {
+    const room = this.room;
+    return !!(room && this.race && !this.practice && this.phase !== Phase.RESULTS && room.race && room.race.raceId !== this.raceId);
   }
 
   refreshLobby() {
     const room = this.room;
     if (!room || this.phase !== Phase.LOBBY) return;
-    const busy = room.phase !== Phase.LOBBY;
+    // A race can be started from the lobby or straight from the results (e.g. after the host changed).
+    const busy = room.phase === Phase.COUNTDOWN || room.phase === Phase.RACING;
     this.ui.setLobby({
       code: room.code,
-      shareUrl: room.shareUrl,
+      shareUrl: this.shareUrl(),
       players: room.players,
       selfId: room.selfId,
       isHost: room.isHost,
@@ -354,6 +374,7 @@ export class Game {
       autopilot: this.autopilot,
     });
     room.setCourseSpan(race.course.startX, race.course.finishX);
+    this.raceId = info.raceId;
     this.enterRace(race);
   }
 
@@ -370,6 +391,7 @@ export class Game {
     const ids = [race.local.id, ...race.remotes.keys(), ...race.bots.map((b) => b.id)].sort();
     this.slots = new Map(ids.map((id, i) => [id, i]));
     this.renderer.setCourse(race.course);
+    this.ui.resetRace();
     this.ui.show('race');
     this.audio.startMusic('race');
   }
@@ -396,6 +418,7 @@ export class Game {
   }
 
   onLocalFinish() {
+    if (this.phase === Phase.RESULTS) return; // crossed the line after the race was called
     const race = this.race;
     const report = race.localReport();
     const place = [...race.finishTimes.entries()].filter(([id, t]) => id !== race.local.id && t < report.timeMs).length + 1;
@@ -408,20 +431,18 @@ export class Game {
   /** @param {import('../contracts.js').RaceResults} results */
   showResults(results) {
     if (!this.race) return; // joined mid-race: stay in the lobby
+    if (!this.practice && results.raceId !== this.raceId) return this.showLobby(); // not the race we rode
     this.lastResults = results;
     this.phase = Phase.RESULTS;
     this.ui.setCountdown(null);
     this.pushResults();
     this.ui.show('results');
     this.audio.startMusic('results');
-    const winner = results.ranking[0];
-    if (this.practice || !winner || winner.timeMs < 0) {
-      this.saved = 'local';
-      this.pushResults();
-      return;
-    }
-    if (!this.room.isHost) {
-      this.saved = 'ok';
+    // The hall of fame is for people: the first human across the line, in room races only.
+    const humans = results.ranking.filter((r) => !r.id.startsWith('bot:'));
+    const winner = humans.find((r) => r.timeMs >= 0);
+    if (this.practice || !winner || !this.room.isHost) {
+      this.saved = null;
       this.pushResults();
       return;
     }
@@ -433,7 +454,7 @@ export class Game {
         colorIndex: winner.colorIndex,
         timeMs: winner.timeMs,
         length: results.settings.length,
-        players: results.ranking.length,
+        players: humans.length,
         score: Math.round(winner.stats?.score ?? 0),
         room: room.code,
         at: Date.now(),
@@ -505,13 +526,15 @@ export class Game {
       }
     }
 
-    const events = race.drainEvents();
+    let events = race.drainEvents();
+    // After a long stall (hidden tab) the catch-up produces a pile of events: only the finish matters.
+    if (events.length > 24) events = events.filter((e) => e.type === SimEvent.FINISH);
     for (const e of events) this.handleEvent(e);
     for (const report of race.drainBotFinishes()) room?.reportFinish(report);
 
     // Network: latest state, 12 times a second (also on the start line, so ghosts line up).
     if (room && now - this.lastSendMs >= NET_SEND_MS) {
-      this.lastSendMs = now;
+      this.lastSendMs = now - this.lastSendMs > 2 * NET_SEND_MS ? now : this.lastSendMs + NET_SEND_MS;
       room.sendState(race.netState());
     }
 

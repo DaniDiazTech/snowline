@@ -27,6 +27,14 @@ import { SIM, TRICKS, GRAVITY, JUMP_VY, DRAG_K, REF_SPEED, RAMP_POP, BODY_CENTER
 const dt = TICK_DT;
 const GRIND_LABELS = { [GrindKind.BUNTING]: 'Bunting Grind', [GrindKind.ROOF]: 'Roof Grind', [GrindKind.ICE]: 'Ice Slide' };
 const FLIP_NAMES = ['', 'backflip', 'doubleBackflip', 'tripleBackflip'];
+/** Solid obstacles: circles (rock, campfire: `size` = radius) and boxes (log, snowman, spikes: `w`, `h`). */
+const SOLID = {
+  [FeatureType.ROCK]: { box: false, smash: 'rockSmash', label: 'Rock Smash' },
+  [FeatureType.CAMPFIRE]: { box: false, smash: 'campfireSmash', label: 'Campfire Smash' },
+  [FeatureType.LOG]: { box: true, smash: 'logSmash', label: 'Log Smash' },
+  [FeatureType.SNOWMAN]: { box: true, smash: 'snowmanSmash', label: 'Snowman Smash' },
+  [FeatureType.SPIKES]: { box: true, smash: 'spikesSmash', label: 'Spikes Smash' },
+};
 
 function freshPrivate() {
   return {
@@ -34,6 +42,7 @@ function freshPrivate() {
     s: 0, // speed along the surface / line (ground, grind, crash slide)
     prevHeld: false,
     holdT: 0, // s the button has been held continuously
+    airPhases: 0, // count of air phases started (diagnostics)
     bufferT: 0,
     coyoteT: 0,
     jumped: false, // current air phase started with a jump
@@ -106,6 +115,8 @@ export class RiderSim {
     this.state.mode = RiderMode.GROUND;
     this._p.phys = 'ground';
     this._p.s = SIM.START_SPEED;
+    this.state.vx = SIM.START_SPEED * Math.cos(this.state.angle);
+    this.state.vy = SIM.START_SPEED * Math.sin(this.state.angle);
   }
 
   /** Copies the complete simulation state of another RiderSim on the same course (used by bots to plan). */
@@ -261,6 +272,16 @@ export class RiderSim {
       this._p.boostDur = t;
       st.shield = true;
       ev.push({ type: SimEvent.BOOST, data: { level, duration: t } });
+      // Instant forward kick, felt right at the landing.
+      const kick = SIM.BOOST_TIERS[Math.max(level, 1) - 1].kick;
+      const p = this._p;
+      const sp = Math.hypot(st.vx, st.vy);
+      if (sp > 1) {
+        const f = (sp + kick) / sp;
+        st.vx *= f;
+        st.vy *= f;
+      }
+      if (p.phys === 'ground' || p.phys === 'grind') p.s += kick;
     }
     cb.points = 0;
     cb.mult = 0;
@@ -271,6 +292,7 @@ export class RiderSim {
     const st = this.state;
     const p = this._p;
     p.phys = 'air';
+    p.airPhases++;
     p.jumped = jumped;
     p.coyoteT = jumped ? 0 : SIM.COYOTE;
     p.takeoffAngle = st.angle;
@@ -406,28 +428,26 @@ export class RiderSim {
       if (p.bufferT > 0 && !p.jumped && !finished) this._jump(ev, st.vx, st.vy);
     }
     const hover = st.hoverT > 0;
-    st.vy += GRAVITY * (hover ? SIM.HOVER_GRAVITY : 1) * dt;
+    // True projectile: constant g, exact integration of the parabola (no vertical drag);
+    // only a light horizontal air drag (and the boost's horizontal push) act on vx.
+    const g = GRAVITY * (hover ? SIM.HOVER_GRAVITY : 1);
     const M = this._mult();
-    const sp = Math.hypot(st.vx, st.vy);
-    const f = Math.max(0, 1 - ((DRAG_K * SIM.AIR_DRAG_MULT) / (M * M)) * sp * dt);
-    st.vx *= f;
-    st.vy *= f;
-    if (st.boostT > 0 && sp > 1 && sp < M * REF_SPEED) {
-      // Boost keeps pushing in the air, so style jumps never cost boosted speed.
-      const push = (this._boostPush() * dt) / sp;
-      st.vx += st.vx * push;
-      st.vy += st.vy * push;
-    }
+    st.vx -= ((DRAG_K * SIM.AIR_DRAG_MULT) / (M * M)) * st.vx * Math.abs(st.vx) * dt;
+    if (st.boostT > 0 && st.vx > 0 && st.vx < M * REF_SPEED) st.vx += this._boostPush() * dt;
     const px = st.x;
     const py = st.y;
     st.x += st.vx * dt;
-    st.y += st.vy * dt;
+    st.y += st.vy * dt + 0.5 * g * dt * dt;
+    st.vy += g * dt;
     st.airTime += dt;
 
-    // Rotation.
+    // Rotation: only a SUSTAINED hold spins (a tap is just a jump). The spin starts once the
+    // button has been held for HOLD_T (counting from the jump press on the ground) and ramps
+    // in over FLIP_RAMP_T. Otherwise the release assist rolls back / finishes the flip.
     const under = Math.atan(c.slopeAt(st.x));
-    if (held) {
-      st.angVel = damp(st.angVel, -SIM.FLIP_RATE, SIM.FLIP_EASE, dt);
+    const spin = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
+    if (spin > 0) {
+      st.angVel = damp(st.angVel, -SIM.FLIP_RATE * spin, SIM.FLIP_EASE, dt);
     } else {
       st.angVel = damp(st.angVel, this._assistRate(under, hover), SIM.RELEASE_DAMP, dt);
     }
@@ -531,18 +551,14 @@ export class RiderSim {
     const vn = -st.vx * Math.sin(th) + st.vy * Math.cos(th);
     const impact = clamp(vn / SIM.IMPACT_REF, 0, 1);
     st.y = this._surf(st.x);
-    // Touching down while still spinning hard (button held) = "you were still flipping".
-    const spinning = this._p.holdT > SIM.SPIN_LAND_HOLD && Math.abs(st.angVel) > SIM.SPIN_LAND_RATE;
-    const tol = spinning ? SIM.SPIN_LAND_ANGLE : SIM.LAND_CLEAN_ANGLE;
-    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= tol;
+    const clean = finished || st.hoverT > 0 || Math.abs(rel) <= SIM.LAND_CLEAN_ANGLE;
     if (!clean) {
       ev.push({ type: SimEvent.LAND, data: { clean: false, impact } });
       this._crash('landing', ev);
       return;
     }
-    const r = st.hoverT > 0 ? 0 : rel / SIM.LAND_CLEAN_ANGLE;
-    const loss = SIM.LAND_LOSS * impact + SIM.SLOPPY_LOSS * r * r;
-    p.s = Math.max(60, vt * (1 - loss));
+    // A landing keeps the tangential component of the velocity and loses the normal one.
+    p.s = Math.max(SIM.MIN_LAND_SPEED, vt);
     st.angle = th + (st.hoverT > 0 ? 0 : rel);
     st.angVel = 0;
     p.landSquash = Math.max(p.landSquash, impact + 0.2);
@@ -552,14 +568,14 @@ export class RiderSim {
     st.airTime = 0;
     st.flips = 0;
     p.overChasm = null;
+    st.vx = p.s * Math.cos(th);
+    st.vy = p.s * Math.sin(th);
     const ice = finished ? null : this._iceAt(st.x);
     if (ice) {
       this._startGrind(ev, ice);
       return;
     }
     p.phys = 'ground';
-    st.vx = p.s * Math.cos(th);
-    st.vy = p.s * Math.sin(th);
     if (!finished) this._bank(ev);
   }
 
@@ -581,7 +597,10 @@ export class RiderSim {
       const thL = Math.atan(ls);
       const rel = wrapAngle(st.angle - thL);
       if (Math.abs(rel) > SIM.GRIND_CATCH_ANGLE && st.hoverT <= 0) continue;
-      p.s = Math.max(120, st.vx * Math.cos(thL) + st.vy * Math.sin(thL));
+      // Catching a line is a landing on it: keep the tangential velocity, lose the normal part.
+      p.s = Math.max(SIM.MIN_LAND_SPEED, st.vx * Math.cos(thL) + st.vy * Math.sin(thL));
+      st.vx = p.s * Math.cos(thL);
+      st.vy = p.s * Math.sin(thL);
       st.y = ly;
       st.angle = thL + rel * 0.5;
       p.overChasm = null;
@@ -610,7 +629,7 @@ export class RiderSim {
     }
     const M = this._mult();
     let a = GRAVITY * Math.sin(th) - ((DRAG_K * (ice ? SIM.ICE_DRAG_MULT : SIM.GRIND_DRAG_MULT)) / (M * M)) * p.s * p.s;
-    if (p.s < 1.15 * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
+    if (p.s < SIM.GRIND_CAP * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
     if (st.boostT > 0 && p.s < M * REF_SPEED) a += this._boostPush();
     if (p.s < SIM.MIN_SPEED) a += SIM.PUSH_ACCEL;
     p.s = clamp(p.s + a * dt, 40, SIM.MAX_GROUND_SPEED);
@@ -657,46 +676,52 @@ export class RiderSim {
     const p = this._p;
     const c = this.course;
     if (p.invulnT > 0 || st.hoverT > 0) return;
-    const list = c.featuresIn(Math.min(px, st.x) - 40, Math.max(px, st.x) + 40);
+    const list = c.featuresIn(Math.min(px, st.x) - 60, Math.max(px, st.x) + 60);
     for (const f of list) {
-      if (f.type !== FeatureType.ROCK && f.type !== FeatureType.CAMPFIRE) continue;
-      if (this.consumed.has(f.id)) continue;
-      const isRock = f.type === FeatureType.ROCK;
-      const r = f.size;
-      const cy = c.heightAt(f.x) - r * (isRock ? SIM.ROCK_CENTER : 0.5);
+      const kind = SOLID[f.type];
+      if (!kind || this.consumed.has(f.id)) continue;
       let hit = false;
       let bounce = false;
-      for (let k = 0; k < 2; k++) {
+      for (let k = 0; k < 2 && !hit && !bounce; k++) {
         const x = k === 0 ? (px + st.x) / 2 : st.x;
         const y = k === 0 ? (py + st.y) / 2 : st.y;
-        const dx = x - f.x;
-        const dy = y - cy;
-        const d2 = dx * dx + dy * dy;
-        if (isRock && !onGround && st.vy > 0 && y < cy && d2 < (r * SIM.ROCK_TOP_ZONE) ** 2) {
-          if (!(p.bounceId === f.id && p.bounceT > 0)) bounce = true;
-          break;
-        }
-        if (d2 < (r * (isRock ? SIM.ROCK_HIT : SIM.CAMPFIRE_HIT)) ** 2) {
-          hit = true;
-          break;
+        const yPrev = k === 0 ? py : (py + st.y) / 2;
+        if (kind.box) {
+          if (Math.abs(x - f.x) > f.w / 2) continue;
+          const top = c.heightAt(x) - f.h;
+          // Log Hop: coming down onto the top of a log.
+          if (f.type === FeatureType.LOG && !onGround && st.vy > 0 && yPrev <= top + 3 && y >= top - SIM.LOG_HOP_TOL) {
+            if (!(p.bounceId === f.id && p.bounceT > 0)) bounce = true;
+          } else if (y > top + 1) hit = true;
+        } else {
+          const r = f.size;
+          const cy = c.heightAt(f.x) - r * (f.type === FeatureType.ROCK ? SIM.ROCK_CENTER : 0.5);
+          const dx = x - f.x;
+          const dy = y - cy;
+          const d2 = dx * dx + dy * dy;
+          if (f.type === FeatureType.ROCK && !onGround && st.vy > 0 && y < cy && d2 < (r * SIM.ROCK_TOP_ZONE) ** 2) {
+            if (!(p.bounceId === f.id && p.bounceT > 0)) bounce = true;
+          } else if (d2 < (r * (f.type === FeatureType.ROCK ? SIM.ROCK_HIT : SIM.CAMPFIRE_HIT)) ** 2) hit = true;
         }
       }
       if (bounce) {
-        st.vy = -SIM.ROCK_BOUNCE_VY;
+        const isLog = f.type === FeatureType.LOG;
+        if (isLog) st.y = Math.min(st.y, c.heightAt(st.x) - f.h);
+        st.vy = -(isLog ? SIM.LOG_HOP_VY : SIM.ROCK_BOUNCE_VY);
         p.bounceId = f.id;
         p.bounceT = 0.4;
-        this._addTrick(ev, 'rockBounce', 'Rock Bounce', TRICKS.ROCK_BOUNCE);
+        if (isLog) this._addTrick(ev, 'logHop', 'Log Hop', TRICKS.LOG_HOP);
+        else this._addTrick(ev, 'rockBounce', 'Rock Bounce', TRICKS.ROCK_BOUNCE);
         continue;
       }
       if (!hit) continue;
       if (st.shield) {
         this.consumed.add(f.id);
-        ev.push({ type: SimEvent.ROCK_SMASH, data: { featureId: f.id, x: f.x, y: cy } });
-        if (isRock) this._addTrick(ev, 'rockSmash', 'Rock Smash', TRICKS.ROCK_SMASH);
-        else this._addTrick(ev, 'campfireSmash', 'Campfire Smash', TRICKS.CAMPFIRE_SMASH);
+        ev.push({ type: SimEvent.ROCK_SMASH, data: { featureId: f.id, x: f.x, y: c.heightAt(f.x) - (f.h ?? f.size) / 2 } });
+        this._addTrick(ev, kind.smash, kind.label, TRICKS.SMASH);
         continue;
       }
-      this._crash(isRock ? 'rock' : 'campfire', ev, { obstacleEnd: f.x + r });
+      this._crash(f.type, ev, { obstacleEnd: f.x + (f.w ? f.w / 2 : f.size) });
       return;
     }
   }
@@ -796,9 +821,10 @@ export class RiderSim {
         x = ch.x1 + SIM.CHASM_RESPAWN_OFFSET;
         moved = true;
       }
-      for (const f of c.featuresIn(x - 40, x + 40)) {
-        if ((f.type === FeatureType.ROCK || f.type === FeatureType.CAMPFIRE) && !this.consumed.has(f.id) && Math.abs(f.x - x) < f.size + 4) {
-          x = f.x + f.size + SIM.RESPAWN_CLEAR;
+      for (const f of c.featuresIn(x - 120, x + 120)) {
+        const half = f.w ? f.w / 2 : f.size;
+        if (SOLID[f.type] && !this.consumed.has(f.id) && Math.abs(f.x - x) < half + 4) {
+          x = f.x + half + SIM.RESPAWN_CLEAR;
           moved = true;
         }
       }

@@ -201,87 +201,168 @@ export class TerrainRenderer {
     if (!this.chasms.length) return;
     const sil = hex(atm.silhouette);
     const shade = hex(atm.snowShade);
+    const haze = hex(atm.skyBottom);
     const ridge = hex(atm.ridges[4]);
-    const rockLit = mix(sil, ridge, 0.55);
-    const rockMid = mix(sil, ridge, 0.28);
-    const deep = scale(sil, 0.7);
+    const rockLit = mix(sil, ridge, 0.5);
+    const rockMid = mix(sil, ridge, 0.26);
+    const rockBand = mix(rockMid, rockLit, 0.45);
+    const deep = scale(sil, 0.55);
     const snow = hex(atm.snow);
     for (const c of this.chasms) {
       const xa = cam.sx(c.x0);
       const xb = cam.sx(c.x1);
-      if (xb < -50 || xa > L.w + 50) continue;
+      if (xb < -60 || xa > L.w + 60) continue;
       const ya = cam.sy(Number.isFinite(c.y0) ? c.y0 : course.heightAt(c.x0 - 0.5));
       const yb = cam.sy(Number.isFinite(c.y1) ? c.y1 : course.heightAt(c.x1 + 0.5));
       const k = cam.scale;
       const yTop = Math.min(ya, yb);
-      // the gap itself
-      const g = ctx.createLinearGradient(0, yTop, 0, yTop + 420 * k);
-      g.addColorStop(0, rgba(mix(shade, sil, 0.55)));
-      g.addColorStop(0.45, rgba(mix(sil, deep, 0.4)));
+      // the gap opens at the LOWER lip; above it, between the lips, the background shows
+      // and the higher side exposes its rock wall (drawn by face())
+      const yLow = Math.max(ya, yb);
+      const wWorld = c.x1 - c.x0;
+      const narrow = wWorld < 120; // crevasse: a dark crack
+      const wide = wWorld > 200; // gorge: far wall + mist
+      const seed = c.id * 13 + (c.variant ?? 0);
+      const bottom = Math.max(L.h + 20, yTop + 700 * k);
+      const gw = xb - xa;
+
+      // 1. the gap. Its top edge is the FAR rim of the gorge: a jagged line a little below
+      // the lips, with a thin snow edge; the far wall under it is hazy, darkening with depth.
+      const rimY = (x) => {
+        const u = (x - xa) / (gw || 1);
+        return ya + (yb - ya) * u + (10 + 7 * Math.sin(u * 9.1 + seed) + 4 * hash01(seed, Math.floor(u * 12))) * k;
+      };
+      const g = ctx.createLinearGradient(0, yTop, 0, yLow + (narrow ? 160 : 360) * k);
+      g.addColorStop(0, rgba(narrow ? mix(shade, sil, 0.7) : mix(mix(rockMid, haze, 0.5), shade, 0.2)));
+      g.addColorStop(0.35, rgba(mix(sil, rockMid, 0.5)));
       g.addColorStop(1, rgba(deep));
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.moveTo(xa, ya);
-      ctx.lineTo(xb, yb);
-      ctx.lineTo(xb, L.h + 20);
-      ctx.lineTo(xa, L.h + 20);
+      const steps = Math.max(4, Math.ceil(gw / (14 * k)));
+      ctx.moveTo(xa, ya + 2);
+      for (let i = 1; i < steps; i++) {
+        const x = xa + (gw * i) / steps;
+        ctx.lineTo(x, rimY(x));
+      }
+      ctx.lineTo(xb, yb + 2);
+      ctx.lineTo(xb, Math.max(L.h + 20, yLow + 1));
+      ctx.lineTo(xa, Math.max(L.h + 20, yLow + 1));
       ctx.closePath();
       ctx.fill();
-      // misty depth haze at the bottom of the gap
-      const seed = c.id * 13 + (c.variant ?? 0);
-      const bottom = Math.max(L.h + 20, ya + 600 * k);
-      // far walls (receding, darker) then near cliff faces
-      const face = (x, y, dir, wFrac, col, layer) => {
-        ctx.fillStyle = rgba(col);
+      if (!narrow) {
+        ctx.strokeStyle = rgba(mix(snow, haze, 0.35), 0.75);
+        ctx.lineWidth = 1.6 * k;
         ctx.beginPath();
-        ctx.moveTo(x, y - 1);
-        let yy = y;
-        let ww = (xb - xa) * wFrac;
-        let i = 0;
-        while (yy < bottom) {
-          const seg = (26 + hash01(seed + layer, i) * 40) * k;
-          const wNow = ww * (0.55 + 0.6 * hash01(seed + layer * 7, i));
-          ctx.lineTo(x + dir * wNow, yy + seg * 0.4);
-          ctx.lineTo(x + dir * wNow * (0.75 + 0.2 * hash01(seed, i + 50)), yy + seg);
-          yy += seg;
-          ww *= 0.97;
-          i++;
+        for (let i = 1; i < steps; i++) {
+          const x = xa + (gw * i) / steps;
+          if (i === 1) ctx.moveTo(x, rimY(x));
+          else ctx.lineTo(x, rimY(x));
         }
-        ctx.lineTo(x, bottom);
+        ctx.stroke();
+      }
+
+      // 2. wide gorge: a hazy far wall with strata, then rising mist
+      if (wide) {
+        const fx0 = xa + gw * 0.12;
+        const fx1 = xb - gw * 0.12;
+        const fTop = yTop + 70 * k;
+        ctx.fillStyle = rgba(mix(rockMid, haze, 0.3));
+        ctx.beginPath();
+        ctx.moveTo(fx0, bottom);
+        const n = 9;
+        for (let i = 0; i <= n; i++) {
+          const u = i / n;
+          ctx.lineTo(fx0 + (fx1 - fx0) * u, fTop + (hash01(seed, 200 + i) * 45 + Math.sin(u * Math.PI) * 25) * k);
+        }
+        ctx.lineTo(fx1, bottom);
         ctx.closePath();
         ctx.fill();
+        ctx.strokeStyle = rgba(mix(rockMid, haze, 0.25), 0.7);
+        ctx.lineWidth = 2 * k;
+        ctx.beginPath();
+        for (let b = 0; b < 4; b++) {
+          const by = fTop + (70 + b * 55) * k;
+          ctx.moveTo(fx0 + 6 * k, by);
+          for (let i = 1; i <= 6; i++) ctx.lineTo(fx0 + ((fx1 - fx0) * i) / 6, by + (hash01(seed, 300 + b * 9 + i) - 0.5) * 10 * k);
+        }
+        ctx.stroke();
+      }
+
+      // 3. cliff walls with strata: alternating rock bands, jagged edges
+      const face = (x, y, dir, wFrac, colA, colB, layer, converge) => {
+        let yy = y;
+        let ww = gw * wFrac;
+        let prevW = ww * 0.6;
+        let i = 0;
+        while (yy < bottom) {
+          const seg = (18 + hash01(seed + layer, i) * 26) * k;
+          const wNow = ww * (0.6 + 0.5 * hash01(seed + layer * 7, i));
+          ctx.fillStyle = rgba(i % 2 ? colA : colB);
+          ctx.beginPath();
+          ctx.moveTo(x, yy - 0.5);
+          ctx.lineTo(x + dir * prevW, yy - 0.5);
+          ctx.lineTo(x + dir * wNow, yy + seg * 0.45);
+          ctx.lineTo(x + dir * wNow * (0.78 + 0.18 * hash01(seed, i + 50)), yy + seg + 0.5);
+          ctx.lineTo(x, yy + seg + 0.5);
+          ctx.closePath();
+          ctx.fill();
+          prevW = wNow * (0.78 + 0.18 * hash01(seed, i + 50));
+          yy += seg;
+          ww *= converge;
+          i++;
+        }
       };
-      face(xa, ya, 1, 0.3, rockMid, 1);
-      face(xb, yb, -1, 0.22, mix(rockMid, deep, 0.4), 2);
-      face(xa, ya, 1, 0.15, rockLit, 3);
-      face(xb, yb, -1, 0.1, rockMid, 4);
-      // shaded snow walls along the cut edges
+      if (narrow) {
+        // a crack: walls lean in and nearly meet a little way down
+        face(xa, ya, 1, 0.46, rockMid, rockBand, 1, 1.03);
+        face(xb, yb, -1, 0.46, mix(rockMid, deep, 0.35), rockMid, 2, 1.03);
+      } else {
+        face(xa, ya, 1, wide ? 0.16 : 0.26, rockMid, rockBand, 1, 0.98);
+        face(xb, yb, -1, wide ? 0.13 : 0.2, mix(rockMid, deep, 0.35), rockMid, 2, 0.98);
+        face(xa, ya, 1, wide ? 0.07 : 0.12, rockLit, mix(rockLit, rockMid, 0.5), 3, 0.97);
+        face(xb, yb, -1, wide ? 0.05 : 0.08, rockMid, rockBand, 4, 0.97);
+      }
+      if (wide || !narrow) {
+        // mist pooling at the bottom
+        const my = yTop + (wide ? 220 : 280) * k;
+        const mg = ctx.createLinearGradient(0, my, 0, my + 260 * k);
+        mg.addColorStop(0, rgba(haze, 0));
+        mg.addColorStop(1, rgba(haze, wide ? 0.5 : 0.25));
+        ctx.fillStyle = mg;
+        ctx.fillRect(xa, my, gw, Math.max(0, bottom - my));
+      }
+
+      // 4. shaded snow walls along the cut edges
       const wall = 7 * k;
       for (const [x, y, dir] of [
         [xa, ya, -1],
         [xb, yb, 1],
       ]) {
-        const gw = ctx.createLinearGradient(x, 0, x + dir * wall, 0);
-        gw.addColorStop(0, rgba(mix(shade, sil, 0.25), 0.9));
-        gw.addColorStop(1, rgba(shade, 0));
-        ctx.fillStyle = gw;
+        const sg = ctx.createLinearGradient(x, 0, x + dir * wall, 0);
+        sg.addColorStop(0, rgba(mix(shade, sil, 0.3), 0.9));
+        sg.addColorStop(1, rgba(shade, 0));
+        ctx.fillStyle = sg;
         ctx.fillRect(dir < 0 ? x - wall : x, y + 2, wall, bottom - y);
       }
-      // snow overhangs with a couple of icicles
+
+      // 5. snow cornices overhanging both lips, with icicles
       ctx.fillStyle = rgba(snow);
+      const corn = narrow ? 0.6 : 1;
       for (const [x, y, dir] of [
         [xa, ya, 1],
         [xb, yb, -1],
       ]) {
+        const q = corn * k;
         ctx.beginPath();
-        ctx.moveTo(x - dir * 4 * k, y);
-        ctx.quadraticCurveTo(x + dir * 12 * k, y - 1 * k, x + dir * 14 * k, y + 5 * k);
-        ctx.lineTo(x + dir * 11 * k, y + 7 * k);
-        ctx.lineTo(x + dir * 9 * k, y + 15 * k);
-        ctx.lineTo(x + dir * 7 * k, y + 8 * k);
-        ctx.lineTo(x + dir * 4 * k, y + 11 * k);
-        ctx.lineTo(x + dir * 2 * k, y + 8 * k);
-        ctx.lineTo(x - dir * 2 * k, y + 9 * k);
+        ctx.moveTo(x - dir * 6 * q, y - 0.5);
+        ctx.quadraticCurveTo(x + dir * 14 * q, y - 3 * q, x + dir * 18 * q, y + 4 * q);
+        ctx.lineTo(x + dir * 15 * q, y + 7 * q);
+        ctx.lineTo(x + dir * 13 * q, y + 17 * q);
+        ctx.lineTo(x + dir * 11 * q, y + 8 * q);
+        ctx.lineTo(x + dir * 7 * q, y + 13 * q);
+        ctx.lineTo(x + dir * 5 * q, y + 8 * q);
+        ctx.lineTo(x + dir * 2 * q, y + 11 * q);
+        ctx.lineTo(x - dir * 2 * q, y + 8 * q);
         ctx.closePath();
         ctx.fill();
       }

@@ -14,7 +14,7 @@
  *   speed=<px/s>  pose speed (default 500 = cruising)
  *   crouch= scarf= angle=     pose overrides (angle in degrees)
  *   boost=0..3 shield=1 hover=1
- *   event=land|crash|smash|pickup|boost|jump|finish   fire one effect shortly before the frame
+ *   event=land|crash|smash|pickup|boost|jump|finish|combo (level=1..3 for boost; evframes=k frames before the end)   fire one effect shortly before the frame
  *   ghosts=<n>    number of other riders (bots)
  *   freeze=1      render a deterministic warm-up, then stop (for screenshots)
  *   rate=<k>      live playback speed multiplier
@@ -235,9 +235,15 @@ async function main() {
       switch (name) {
         case 'land': return { type: SimEvent.LAND, data: { clean: true, impact: 0.9 } };
         case 'crash': return { type: SimEvent.CRASH, data: { cause: 'landing', x: v.x, y: v.y } };
-        case 'smash': return { type: SimEvent.ROCK_SMASH, data: { featureId: -1, x: v.x + 30, y: course.heightAt(v.x + 30) } };
+        case 'smash': {
+          // smash the nearest solid obstacle ahead (hidden from then on)
+          const solid = ['rock', 'log', 'snowman', 'spikes', 'campfire'];
+          const f = course.featuresIn(v.x - 50, v.x + 400).find((o) => solid.includes(o.type));
+          return f ? { type: SimEvent.ROCK_SMASH, data: { featureId: f.id, x: f.x, y: course.heightAt(f.x) } } : { type: SimEvent.ROCK_SMASH, data: { featureId: -1, x: v.x + 30, y: course.heightAt(v.x + 30) } };
+        }
+        case 'combo': return { type: SimEvent.COMBO, data: { points: 100, mult: 2, total: 200, tricks: ['backflip'] } };
         case 'pickup': return { type: SimEvent.PICKUP, data: { featureId: -1, kind: 'coin', x: v.x + 10, y: v.y - 30 } };
-        case 'boost': return { type: SimEvent.BOOST, data: { level: 2, duration: 3 } };
+        case 'boost': return { type: SimEvent.BOOST, data: { level: num('level', 2), duration: 3 } };
         case 'jump': return { type: SimEvent.JUMP, data: {} };
         case 'finish': return { type: SimEvent.FINISH, data: { tick: 0, timeMs: 0 } };
         default: return null;
@@ -260,7 +266,7 @@ async function main() {
           const back = ((frames - k) * dtMs) / 1000;
           Q.set('x', String(x - speed * back * 0.98));
           const f = framePose(tm, dtMs, []);
-          if (evName && k === frames - 14) {
+          if (evName && k === frames - num('evframes', 14)) {
             const e = eventFor(evName, f.local);
             if (e) f.events.push(e);
           }

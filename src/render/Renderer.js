@@ -243,10 +243,10 @@ export class Renderer {
     this.weather.drawFog(ctx, atm, L);
     this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x));
     this.weather.drawPrecip(ctx, atm, L);
-    const boostT = local.boostLevel >= 2 ? 0.35 + local.boostLevel * 0.2 : local.boostLevel ? 0.25 : 0;
+    const boostT = local.boostLevel ? 0.3 * local.boostLevel : 0;
     this.boostFx += (boostT - this.boostFx) * (1 - Math.exp(-dt * 5));
     this.pulse *= Math.exp(-dt * 4);
-    this.effects.drawPost(ctx, atm, P, L, { boost: frame.cinematic ? 0 : this.boostFx, pulse: this.pulse, dir: Math.PI + Math.atan2(local.vy, local.vx), ry: cam.sy(local.y) - 20 * cam.scale });
+    this.effects.drawPost(ctx, atm, P, L, { rx: cam.sx(local.x), ryy: cam.sy(local.y) - 18 * cam.scale, boost: frame.cinematic ? 0 : this.boostFx, pulse: this.pulse, dir: Math.PI + Math.atan2(local.vy, local.vx), ry: cam.sy(local.y) - 20 * cam.scale });
 
     // name tags of ghosts (not on cinematic screens)
     if (!frame.cinematic) {
@@ -289,12 +289,15 @@ export class Renderer {
       lights: clamp(lights, 0, 1),
       rockDark: mix(sil, ridge4, 0.22),
       rockLit: mix(sil, ridge4, 0.55),
+      shadeDeep: mix(shade, sil, 0.45),
+      bark: mix([96, 62, 44], sil, 0.3 + 0.45 * night),
+      wood: mix([222, 182, 132], sil, 0.15 + 0.5 * night),
       festive,
       wind: atm.weather === 'storm' ? atm.weatherAmt : atm.weather === 'snow' ? atm.weatherAmt * 0.4 : 0,
       glow: this.glowFn || (this.glowFn = (x, y, r, a, c) => this.pushGlow(x, y, r, a, c)),
     };
     // particle colours: 0 snow, 1 shade, 2 rock, 3 warm, 4 white, 5 gold, 6 local player
-    P.particleColors = [rgba(mix(snow, [255, 255, 255], 0.3)), rgba(mix(snow, shade, 0.5)), rgba(P.rockDark), rgba([255, 170, 70]), '#ffffff', '#ffd75a', this.prevLocal?.color || '#ffffff', ...FESTIVE.map((c) => rgba(mix(c, sil, 0.1 + 0.3 * night)))];
+    P.particleColors = [rgba(mix(snow, [255, 255, 255], 0.3)), rgba(mix(snow, shade, 0.5)), rgba(P.rockDark), rgba([255, 170, 70]), '#ffffff', '#ffd75a', this.prevLocal?.color || '#ffffff', ...FESTIVE.map((c) => rgba(mix(c, sil, 0.1 + 0.3 * night))), rgba(P.bark), rgba(mix(snow, [150, 215, 245], 0.55))];
     P.accentGlow = accent;
     return P;
   }
@@ -345,6 +348,7 @@ export class Renderer {
           break;
         }
         case SimEvent.CRASH:
+          if (d.cause === 'log' || d.cause === 'snowman' || d.cause === 'spikes') this.obstacleFx(d.cause, x, y, local, 0.6);
           this.burst(x, y, 40, 300, 0);
           this.burst(x, y, 14, 160, 1);
           cam.addShake(6);
@@ -352,6 +356,11 @@ export class Renderer {
         case SimEvent.ROCK_SMASH: {
           if (d.featureId != null) this.consumed.add(d.featureId);
           const f = this.featureById(d.featureId, x);
+          if (f && (f.type === 'log' || f.type === 'snowman' || f.type === 'spikes')) {
+            this.obstacleFx(f.type, f.x, this.course.heightAt(f.x), local, 1);
+            cam.addShake(3);
+            break;
+          }
           if (f && f.type === 'campfire') {
             // shield through a campfire: logs scatter, embers burst, a puff of smoke
             for (let i = 0; i < 26; i++) ps.spawn(PK.EMBER, x + ps.rand(-10, 10), y - ps.rand(4, 20), local.vx * 0.3 + ps.rand(-160, 160), ps.rand(-320, -60), ps.rand(0.5, 1.2), ps.rand(1.6, 3), 3, 500, 1);
@@ -375,12 +384,26 @@ export class Renderer {
           ps.spawn(PK.RING, x, y, 0, 0, 0.45, 26, d.kind === 'coin' ? 5 : 4, 0, 0);
           for (let i = 0; i < (d.kind === 'coin' ? 5 : 12); i++) ps.spawn(PK.SPARKLE, x + ps.rand(-10, 10), y + ps.rand(-10, 10), ps.rand(-60, 60), ps.rand(-90, 20), ps.rand(0.35, 0.7), ps.rand(3, 6), d.kind === 'coin' ? 5 : 4, 0, 2);
           break;
-        case SimEvent.BOOST:
-          this.pulse = Math.max(this.pulse, 0.5 + 0.15 * (d.level || 1));
-          for (let i = 0; i < 24; i++) {
+        case SimEvent.BOOST: {
+          const lv = clamp(d.level || 1, 1, 3);
+          this.pulse = Math.max(this.pulse, 0.25 + 0.15 * lv);
+          cam.kick(0.035 + 0.035 * lv);
+          this.effects.burstAt(lv, P.t);
+          this.riders.flare(local.id, lv);
+          this.burst(local.x, local.y, 10 + 10 * lv, 160 + 60 * lv, 0);
+          for (let i = 0; i < 12 + 12 * lv; i++) {
             const a = ps.rand(0, Math.PI * 2);
             const s = ps.rand(80, 260);
             ps.spawn(PK.SPARKLE, local.x, local.y - 20, Math.cos(a) * s, Math.sin(a) * s, ps.rand(0.4, 0.9), ps.rand(3, 7), i % 2 ? 4 : 6, 0, 3);
+          }
+          break;
+        }
+        case SimEvent.COMBO:
+          // banked trick on landing: a small sparkle ring at the board
+          ps.spawn(PK.RING, local.x, local.y - 4, 0, 0, 0.4, 30, 4, 0, 0);
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2;
+            ps.spawn(PK.SPARKLE, local.x + Math.cos(a) * 14, local.y - 6 + Math.sin(a) * 6, Math.cos(a) * 70, Math.sin(a) * 30 - 30, 0.45, 3.5, i % 2 ? 4 : 5, 0, 2);
           }
           break;
         case SimEvent.JUMP:
@@ -410,6 +433,30 @@ export class Renderer {
         default:
           break;
       }
+    }
+  }
+
+  /** Smash / crash effect per obstacle kind (strength 1 = smashed through with the shield). */
+  obstacleFx(type, x, y, local, k) {
+    const ps = this.particles;
+    const vx = local.vx * 0.35;
+    if (type === 'log') {
+      // splinters + a puff of snow from the cap
+      for (let i = 0; i < 22 * k; i++) ps.spawn(PK.SHARD, x + ps.rand(-30, 30), y - ps.rand(4, 20), vx + ps.rand(-140, 220), ps.rand(-360, -80), ps.rand(0.6, 1.1), ps.rand(2.5, 6), i % 3 ? 13 : 2, 1100, 0.6);
+      this.burst(x, y - 10, 14 * k, 180, 0);
+    } else if (type === 'snowman') {
+      // big soft snow explosion and the hat flying off
+      for (let i = 0; i < 46 * k; i++) {
+        const a = -Math.PI * ps.rand(0.05, 0.95);
+        const sp = ps.rand(60, 320);
+        ps.spawn(PK.PUFF, x + ps.rand(-10, 10), y - ps.rand(5, 50), vx * 0.5 + Math.cos(a) * sp, Math.sin(a) * sp, ps.rand(0.6, 1.3), ps.rand(3, 8), i % 4 ? 0 : 1, 300, 2.2);
+      }
+      ps.spawn(PK.HAT, x, y - 55, vx + 120, -380, 1.6, 6, 2, 900, 0.3);
+      for (let i = 0; i < 6; i++) ps.spawn(PK.SHARD, x, y - 30, vx + ps.rand(-90, 160), ps.rand(-300, -100), 0.9, 2.5, 2, 1000, 0.6);
+    } else {
+      // ice glitter
+      for (let i = 0; i < 26 * k; i++) ps.spawn(PK.SHARD, x + ps.rand(-60, 60), y - ps.rand(2, 12), vx + ps.rand(-120, 200), ps.rand(-300, -60), ps.rand(0.5, 1), ps.rand(2, 4.5), 14, 1000, 0.7);
+      for (let i = 0; i < 16 * k; i++) ps.spawn(PK.SPARKLE, x + ps.rand(-60, 60), y - ps.rand(4, 30), ps.rand(-60, 60), ps.rand(-120, -10), ps.rand(0.4, 0.9), ps.rand(3, 6), 4, 200, 2);
     }
   }
 
@@ -469,8 +516,13 @@ export class Renderer {
       const ca = Math.cos(v.angle);
       const sa = Math.sin(v.angle);
       const local = v.isLocal || v === frame.local;
+      if (!local) {
+        // ghosts off screen emit nothing
+        const gx = this.camera.sx(v.x);
+        if (gx < -100 || gx > this.width + 100) continue;
+      }
       if (v.mode === RiderMode.GROUND && sp > 60) {
-        const rate = clamp(sp / 900, 0, 1.6) * (local ? 110 : 30);
+        const rate = clamp(sp / 900, 0, 1.6) * (local ? 110 * (1 + 0.6 * (v.boostLevel || 0)) : 22);
         em.spray += rate * dt;
         const tx = v.x - ca * 13;
         const ty = v.y - sa * 13;

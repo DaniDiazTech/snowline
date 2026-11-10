@@ -105,6 +105,7 @@ export class Ghost {
       y = Math.min(y, course.heightAt(x));
     }
     return {
+      t: lerp(a.t, b.t, k) + extraS * 1000,
       x,
       y,
       vx: lerp(a.vx, b.vx, k),

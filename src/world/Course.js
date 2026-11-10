@@ -59,9 +59,27 @@ export const COURSE = Object.freeze({
   SLOPE_MAX: 0.75,
   GAP_MIN_M: 60, // breathing room between set pieces (scaled down to 75% at the end)
   GAP_MAX_M: 125,
-  CHASM_WIDTH: [150, 255], // px, from start to end of course (difficulty)
+  // Pits: guaranteed count per length (first one within the first ~30%), three width classes.
+  PITS: { sprint: 3, classic: 5, marathon: 8 },
+  PIT_NARROW: [80, 120], // crevasse: any jump clears it, no kicker
+  PIT_MEDIUM: [150, 195], // kicker in front
+  PIT_WIDE: [210, 250], // kicker in front; + up to 30 px with difficulty
+  PIT_DOUBLE_PAD: [430, 540], // landing pad between the two pits of a double pit
   PIT_DEPTH: 560, // pit floor below the lower lip
   ROCK_R: [14, 30],
+  // Obstacle kinds per biome (weights) and box sizes (px). Boxes are {x (centre), w, h}.
+  OBSTACLE_MIX: {
+    slopes: { rock: 0.55, log: 0.15, snowman: 0.1, spikes: 0.2 },
+    forest: { log: 0.55, rock: 0.3, snowman: 0.15 },
+    village: { snowman: 0.45, campfire: 0.2, rock: 0.15, log: 0.2 },
+    ridge: { spikes: 0.45, rock: 0.4, log: 0.15 },
+  },
+  LOG_W: [70, 110],
+  LOG_H: [18, 24],
+  SNOWMAN_W: [28, 32],
+  SNOWMAN_H: [52, 60],
+  SPIKES_W: [120, 200],
+  SPIKES_H: 12,
   CREST_CLEAR: 700, // no rock within this distance after a natural launch point
   LAUNCH_SPEED: 470, // speed used to find natural launch points (crests)
   COIN_SPACING_T: 0.075, // s between coins on an arc
@@ -71,10 +89,10 @@ const BIOMES = ['slopes', 'forest', 'village', 'ridge'];
 
 /** Set-piece weights per biome. */
 const PIECE_WEIGHTS = {
-  slopes: { kicker: 3, rocks: 2.5, bunting: 2, chasm: 1, drop: 1.5, ice: 1 },
-  forest: { rocks: 3, kicker: 2, bunting: 1.5, drop: 1, campfire: 0.8, chasm: 0.8 },
+  slopes: { kicker: 3, obstacles: 2.5, bunting: 2, chasm: 0.8, drop: 1.5, ice: 1 },
+  forest: { obstacles: 3, kicker: 2, bunting: 1.5, drop: 1, campfire: 0.8, chasm: 0.6 },
   village: { roofs: 4, bunting: 2.5, kicker: 1, campfire: 1, ice: 1 },
-  ridge: { chasm: 2.5, drop: 2, rocks: 2, kicker: 1.5 },
+  ridge: { chasm: 2, drop: 2, obstacles: 2.5, kicker: 1.5 },
 };
 
 /**
@@ -147,10 +165,20 @@ export function generateCourse(seed, settings) {
     let x = startX + COURSE.FREE_START_M * PX_PER_M;
     minorSlots.push({ x0: startX + 600, x1: x - 200, d: 0, safe: true });
     let prevType = '';
+    // Pit schedule (progress fractions): first within the first ~30%, the rest spread out.
+    const pitCount = COURSE.PITS[set.length] || COURSE.PITS.classic;
+    const firstPit = rngLayout.range(0.1, 0.26);
+    const pitAt = [];
+    for (let k = 0; k < pitCount; k++) pitAt.push(firstPit + (k * (0.9 - firstPit)) / Math.max(1, pitCount - 1) + (k ? rngLayout.range(-0.03, 0.03) : 0));
     while (true) {
       const biome = biomeAt(x);
       const d = progressOf(x);
-      const piece = planPiece(rngLayout, pickPiece(rngLayout, biome, prevType, d), x, d);
+      let type = pickPiece(rngLayout, biome, prevType, d);
+      if (pitAt.length && d >= pitAt[0]) {
+        type = 'chasm';
+        while (pitAt.length && d >= pitAt[0]) pitAt.shift();
+      }
+      const piece = planPiece(rngLayout, type, x, d);
       if (piece.x1 > finishX - COURSE.FINISH_CLEAR) break;
       pieces.push(piece);
       prevType = piece.type;
@@ -231,7 +259,7 @@ export function generateCourse(seed, settings) {
         flatten(p.lipX - p.rampLen - 200, p.lipX + 700, 160, 0.14, 0.26);
         break;
       case 'chasm':
-        flatten(p.cx0 - 500, p.cx1 + 650, 160, 0.16, 0.26);
+        flatten(p.cx0 - 500, p.pits[p.pits.length - 1][1] + 650, 160, 0.16, 0.26);
         break;
       case 'bunting':
       case 'roofs':
@@ -241,8 +269,8 @@ export function generateCourse(seed, settings) {
       case 'campfire':
         flatten(p.x0, p.x1, 150, 0.08, 0.2, 0.85);
         break;
-      case 'rocks':
-        // Rocks sit on the rolling terrain (the crest rule keeps them fair); only soften extremes.
+      case 'obstacles':
+        // Obstacles sit on the rolling terrain (the crest rule keeps them fair); only soften extremes.
         flatten(p.x0, p.x1, 200, 0.1, 0.32, 0.35);
         break;
       case 'drop': {
@@ -286,7 +314,7 @@ export function generateCourse(seed, settings) {
   // Kicker bumps (y up = negative offset). Quadratic face, C1 Hermite fall-off behind the lip.
   for (const p of pieces) {
     if (p.type === 'kicker') addKicker(p.lipX, p.rampLen, p.rampH, 70);
-    if (p.type === 'chasm') addKicker(p.cx0, p.rampLen, p.rampH, Math.min(60, (p.cx1 - p.cx0) * 0.4));
+    if (p.type === 'chasm' && p.rampLen > 0) addKicker(p.cx0, p.rampLen, p.rampH, Math.min(60, (p.cx1 - p.cx0) * 0.4));
   }
   function addKicker(lipX, rampLen, rampH, fallLen) {
     const a = lipX - rampLen;
@@ -332,19 +360,21 @@ export function generateCourse(seed, settings) {
   const chasmCell = new Int16Array(n); // chasm index + 1 for cells overlapping a chasm
   for (const p of pieces) {
     if (p.type !== 'chasm') continue;
+    for (const [px0, px1] of p.pits) {
     const c = {
       type: FeatureType.CHASM,
-      x: p.cx0,
-      x0: p.cx0,
-      x1: p.cx1,
-      y0: baseHeightAt(p.cx0),
-      y1: baseHeightAt(p.cx1),
+      x: px0,
+      x0: px0,
+      x1: px1,
+      y0: baseHeightAt(px0),
+      y1: baseHeightAt(px1),
       variant: rngFeat.int(0, 3),
     };
     c.floorY = Math.max(c.y0, c.y1) + COURSE.PIT_DEPTH;
     c.y = c.floorY;
     chasms.push(c);
     for (let i = idx(c.x0) - 1; i <= idx(c.x1) + 1; i++) chasmCell[i] = chasms.length;
+    }
   }
   const chasmAt = (x) => {
     const u = Math.round((x - minX) / step);
@@ -377,7 +407,7 @@ export function generateCourse(seed, settings) {
   const blocked = []; // [x0, x1] ranges where no rock may stand
   for (const p of pieces) blocked.push([p.x0 - 250, p.x1 + 150]);
   const isBlockedForRock = (x, r) => {
-    for (let i = idx(x - 450); i <= idx(x + r); i++) if (crestBlock[i]) return true;
+    for (let i = idx(x - r - 450); i <= idx(x + r); i++) if (crestBlock[i]) return true;
     for (const [a, b] of blocked) if (x + r > a && x - r < b) return true;
     return false;
   };
@@ -428,15 +458,40 @@ export function generateCourse(seed, settings) {
     features.push(g);
     return g;
   };
-  const addRock = (x, d) => {
-    const r = lerp(COURSE.ROCK_R[0], COURSE.ROCK_R[0] + 6, rngFeat.next()) + (COURSE.ROCK_R[1] - COURSE.ROCK_R[0] - 6) * d * rngFeat.next();
-    let rx = x;
-    for (let tries = 0; tries < 6 && isBlockedForRock(rx, r); tries++) rx += 110;
-    if (isBlockedForRock(rx, r) || chasmAt(rx)) return null;
-    const rock = { type: FeatureType.ROCK, x: rx, size: Math.round(r), variant: rngFeat.int(0, 5) };
-    features.push(rock);
-    return rock;
+  /** Weighted obstacle kind for a biome. */
+  const pickKind = (biome) => {
+    const mix = COURSE.OBSTACLE_MIX[biome];
+    let r = rngFeat.next() * Object.values(mix).reduce((a, b) => a + b, 0);
+    for (const [k, w] of Object.entries(mix)) if ((r -= w) <= 0) return k;
+    return 'rock';
   };
+  /**
+   * Places a solid obstacle near x (shifted forward past crests / blocked ranges if needed).
+   * `owned` = inside its own set piece (only the crest rule applies there).
+   */
+  const addObstacle = (kind, x, d, owned = false) => {
+    const R = (a) => lerp(a[0], a[1], rngFeat.next());
+    let f;
+    if (kind === 'rock') {
+      const r = lerp(COURSE.ROCK_R[0], COURSE.ROCK_R[0] + 6, rngFeat.next()) + (COURSE.ROCK_R[1] - COURSE.ROCK_R[0] - 6) * d * rngFeat.next();
+      f = { type: FeatureType.ROCK, x, size: Math.round(r), variant: rngFeat.int(0, 5) };
+    } else if (kind === 'campfire') f = { type: FeatureType.CAMPFIRE, x, size: 16, variant: rngFeat.int(0, 2) };
+    else if (kind === 'log') f = { type: FeatureType.LOG, x, w: Math.round(R(COURSE.LOG_W)), h: Math.round(R(COURSE.LOG_H)), variant: rngFeat.int(0, 3) };
+    else if (kind === 'snowman') f = { type: FeatureType.SNOWMAN, x, w: Math.round(R(COURSE.SNOWMAN_W)), h: Math.round(R(COURSE.SNOWMAN_H)), variant: rngFeat.int(0, 3) };
+    else f = { type: FeatureType.SPIKES, x, w: Math.round(lerp(COURSE.SPIKES_W[0], COURSE.SPIKES_W[1], rngFeat.next() * (0.5 + 0.5 * d))), h: COURSE.SPIKES_H, variant: rngFeat.int(0, 3) };
+    const half = f.w ? f.w / 2 : f.size;
+    const bad = (xx) => (owned ? crestNear(xx, half) : isBlockedForRock(xx, half)) || chasmNear(xx, half + 40) || xx + half > finishX - COURSE.FINISH_CLEAR;
+    for (let tries = 0; tries < 6 && bad(f.x); tries++) f.x += 110;
+    if (bad(f.x)) return null;
+    features.push(f);
+    return f;
+  };
+  const crestNear = (xx, half) => {
+    for (let i = idx(xx - half - 450); i <= idx(xx + half); i++) if (crestBlock[i]) return true;
+    return false;
+  };
+  const chasmNear = (xx, pad) => chasms.some((c) => xx + pad > c.x0 && xx - pad < c.x1);
+
 
   const decorFixed = []; // decor tied to features (huts, poles)
   for (const p of pieces) placePiece(p);
@@ -450,22 +505,26 @@ export function generateCourse(seed, settings) {
         break;
       }
       case 'chasm': {
-        features.push({ type: FeatureType.RAMP, x: p.cx0 - p.rampLen, x0: p.cx0 - p.rampLen, x1: p.cx0, lipX: p.cx0, size: p.rampH, variant: 0 });
-        jumpArcFrom(p.cx0 - 2, RAMP_POP, baseSlopeAt(p.cx0 - 1), { max: 14 });
+        if (p.rampLen > 0) {
+          features.push({ type: FeatureType.RAMP, x: p.cx0 - p.rampLen, x0: p.cx0 - p.rampLen, x1: p.cx0, lipX: p.cx0, size: p.rampH, variant: 0 });
+          jumpArcFrom(p.cx0 - 2, RAMP_POP, baseSlopeAt(p.cx0 - 1), { max: 14 });
+        } else jumpArcFrom(p.cx0 - 30, 0, null, { max: 12 });
         break;
       }
-      case 'rocks': {
+      case 'obstacles': {
         let first = null;
+        let x = p.x0 + 200;
         for (let i = 0; i < p.count; i++) {
-          const rock = addRockRaw(p.x0 + 200 + i * p.spacing, d);
-          if (!first) first = rock;
+          const o = addObstacle(pickKind(biomeAt(x)), x, d, true);
+          if (!first) first = o;
+          x = (o ? o.x + extent(o)[1] - o.x : x) + p.spacing;
         }
         if (first) jumpArcFrom(first.x - speedEst(first.x) * 0.42, 0, null, { max: 10 });
         break;
       }
       case 'campfire': {
         const fx = p.x0 + 380;
-        features.push({ type: FeatureType.CAMPFIRE, x: fx, size: 16, variant: rngFeat.int(0, 2) });
+        addObstacle('campfire', fx, d, true);
         jumpArcFrom(fx - speedEst(fx) * 0.42, 0, null, { max: 10 });
         decorFixed.push({ type: 'lantern', x: fx - 90, scale: 1, depth: 0.4, variant: 0 });
         break;
@@ -501,6 +560,7 @@ export function generateCourse(seed, settings) {
               if (minClear >= 52 || g.sag <= 0) break;
               g.sag = Math.max(0, g.sag - (52 - minClear) - 1);
             }
+            if (i === 0 && biomeAt(x0) === 'village' && rngFeat.chance(0.6)) addObstacle('snowman', x0 + 45, d, true);
             decorFixed.push({ type: 'pole', x: x0, scale: pole0 / 90, depth: 0, variant: 0 });
             decorFixed.push({ type: 'pole', x: x1, scale: pole1 / 90, depth: 0, variant: 0 });
           }
@@ -522,20 +582,7 @@ export function generateCourse(seed, settings) {
       }
     }
   }
-  function addRockRaw(x, d) {
-    // Rocks inside a rock-field piece: only the crest rule applies (the piece owns its range).
-    const r = lerp(COURSE.ROCK_R[0], COURSE.ROCK_R[0] + 6, rngFeat.next()) + (COURSE.ROCK_R[1] - COURSE.ROCK_R[0] - 6) * d * rngFeat.next();
-    let rx = x;
-    const crest = (xx) => {
-      for (let i = idx(xx - 450); i <= idx(xx + r); i++) if (crestBlock[i]) return true;
-      return false;
-    };
-    for (let tries = 0; tries < 4 && crest(rx); tries++) rx += 90;
-    if (crest(rx) || chasmAt(rx)) return null;
-    const rock = { type: FeatureType.ROCK, x: rx, size: Math.round(r), variant: rngFeat.int(0, 5) };
-    features.push(rock);
-    return rock;
-  }
+
 
   // Minor elements in the gaps.
   let powerCounter = rngFeat.int(0, 2);
@@ -550,9 +597,12 @@ export function generateCourse(seed, settings) {
         addPickup(PickupKind.COIN, x, baseHeightAt(x) - BODY_CENTER);
       }
     }
-    if (!slot.safe && slot.d > 0.1 && rngFeat.chance(0.6)) {
-      const rx = slot.x0 + span * rngFeat.range(0.55, 0.7);
-      if (rx < finishX - COURSE.FINISH_CLEAR - 200) addRock(rx, slot.d);
+    if (!slot.safe) {
+      // Something to react to in every gap; a second one in long gaps as the course goes on.
+      const two = span > 2000 && rngFeat.chance(0.05 + 0.5 * slot.d);
+      const one = rngFeat.chance(0.7 + 0.3 * slot.d);
+      const fr = two ? [rngFeat.range(0.4, 0.5), rngFeat.range(0.68, 0.78)] : one ? [rngFeat.range(0.5, 0.68)] : [];
+      for (const t of fr) addObstacle(pickKind(biomeAt(slot.x0 + span * t)), slot.x0 + span * t, slot.d);
     }
     if (!slot.safe && ++powerCounter % 4 === 0) {
       const kind = rngFeat.chance(0.5) ? PickupKind.FEATHER : PickupKind.MAGNET;
@@ -564,13 +614,17 @@ export function generateCourse(seed, settings) {
 
   // Sort, assign stable ids, freeze.
   features.sort((a, b) => a.x - b.x || typeOrder(a.type) - typeOrder(b.type));
-  let maxFeatureSpan = 0;
+  let maxRight = 0; // max(end - x)
+  let maxLeft = 0; // max(x - start)
   features.forEach((f, i) => {
     f.id = i;
     if (f.y !== undefined) f.y = round2(f.y);
-    if (f.x1 !== undefined) maxFeatureSpan = Math.max(maxFeatureSpan, f.x1 - f.x);
+    const [a, b] = extent(f);
+    maxRight = Math.max(maxRight, b - f.x);
+    maxLeft = Math.max(maxLeft, f.x - a);
     Object.freeze(f);
   });
+  const maxFeatureSpan = maxRight;
   Object.freeze(features);
 
   function grindLineY(f, x) {
@@ -627,12 +681,12 @@ export function generateCourse(seed, settings) {
   /* ---------------- queries ---------------- */
   function featuresIn(x0, x1) {
     const out = [];
-    let i = lowerBound(features, x0 - maxFeatureSpan, (f) => f.x);
+    let i = lowerBound(features, x0 - maxRight, (f) => f.x);
     for (; i < features.length; i++) {
       const f = features[i];
-      if (f.x > x1) break;
-      const end = f.x1 ?? f.x;
-      if (end >= x0) out.push(f);
+      if (f.x > x1 + maxLeft) break;
+      const [a, b] = extent(f);
+      if (b >= x0 && a <= x1) out.push(f);
     }
     return out;
   }
@@ -664,6 +718,7 @@ export function generateCourse(seed, settings) {
     _chasmAt: chasmAt,
     _chasms: Object.freeze(chasms),
     _biomeAt: biomeAt,
+    _extent: extent,
   });
 }
 
@@ -675,7 +730,15 @@ function softClamp(v, lo, hi, k) {
 }
 
 function typeOrder(t) {
-  return ['chasm', 'ramp', 'grind', 'rock', 'campfire', 'pickup'].indexOf(t);
+  return ['chasm', 'ramp', 'grind', 'rock', 'log', 'snowman', 'spikes', 'campfire', 'pickup'].indexOf(t);
+}
+
+/** Horizontal extent [start, end] of a feature (ranges, boxes centred on x, circles of radius size). */
+function extent(f) {
+  if (f.x1 !== undefined) return [f.x0 ?? f.x, f.x1];
+  if (f.w !== undefined) return [f.x - f.w / 2, f.x + f.w / 2];
+  if (f.size !== undefined && f.type !== 'ramp') return [f.x - f.size, f.x + f.size];
+  return [f.x, f.x];
 }
 
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -708,15 +771,25 @@ function planPiece(rng, type, x, d) {
       p.x1 = p.lipX + 950;
       break;
     case 'chasm': {
-      p.rampLen = rng.range(120, 150);
-      p.rampH = rng.range(15, 21);
+      // Width class: narrow crevasse (no kicker), medium or wide (kicker in front); sometimes a double pit.
+      const r = rng.next();
+      const cls = r < 0.3 ? 'narrow' : r < 0.72 ? 'medium' : 'wide';
+      const R = (a) => lerp(a[0], a[1], rng.next());
+      const width = cls === 'narrow' ? R(COURSE.PIT_NARROW) : cls === 'medium' ? R(COURSE.PIT_MEDIUM) : R(COURSE.PIT_WIDE) + 30 * d * rng.next();
+      p.pitClass = cls;
+      p.rampLen = cls === 'narrow' ? 0 : rng.range(120, 150);
+      p.rampH = cls === 'wide' ? rng.range(18, 24) : rng.range(15, 21);
       p.cx0 = x + 520;
-      const [w0, w1] = COURSE.CHASM_WIDTH;
-      p.cx1 = p.cx0 + clamp(lerp(w0, w1, d) + rng.range(-15, 20), w0, w1 + 10);
-      p.x1 = p.cx1 + 800;
+      p.cx1 = p.cx0 + width;
+      p.pits = [[p.cx0, p.cx1]];
+      if (cls !== 'wide' && rng.chance(0.18 + 0.12 * d)) {
+        const a = p.cx1 + R(COURSE.PIT_DOUBLE_PAD);
+        p.pits.push([a, a + R(COURSE.PIT_NARROW) + 20 * rng.next()]);
+      }
+      p.x1 = p.pits[p.pits.length - 1][1] + 800;
       break;
     }
-    case 'rocks':
+    case 'obstacles':
       p.count = Math.min(3, 1 + Math.floor(rng.next() * (1.4 + 2 * d)));
       p.spacing = rng.range(340, 480);
       p.x1 = x + 200 + p.count * p.spacing + 250;

@@ -116,6 +116,11 @@ export class UI {
     if (screen === 'lobby' || screen === 'results') this.views[screen].el.scrollTop = 0;
   }
 
+  /** Clears every per-race HUD state (finish overlay, combo, toasts). Call when a new race begins. */
+  resetRace() {
+    this.hud.reset();
+  }
+
   /* ================= home ================= */
 
   setProfile(profile) {

@@ -25,6 +25,11 @@ export class Effects {
     this.h = 0;
   }
 
+  /** Radial speed-line burst from the rider when a boost fires. */
+  burstAt(level, t) {
+    this.burst = { level, t0: t };
+  }
+
   resize(w, h) {
     this.w = w;
     this.h = h;
@@ -155,6 +160,29 @@ export class Effects {
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, L.w, L.h);
       ctx.globalCompositeOperation = 'source-over';
+    }
+    if (this.burst) {
+      const age = t - this.burst.t0;
+      const lv = this.burst.level;
+      const dur = 0.3 + 0.08 * lv;
+      if (age < 0 || age > dur) this.burst = null;
+      else {
+        const u = age / dur;
+        const n = 10 + 8 * lv;
+        const r0 = 30 + u * (120 + 90 * lv);
+        const len = (40 + 50 * lv) * (1 - u * 0.5);
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = `rgba(255,255,255,${(0.5 + 0.15 * lv) * (1 - u)})`;
+        ctx.lineWidth = 1.2 + 0.6 * lv;
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2 + hash01(i, 61) * 0.4;
+          const rr = r0 * (0.8 + 0.4 * hash01(i, 62));
+          ctx.moveTo(fx.rx + Math.cos(a) * rr, fx.ryy + Math.sin(a) * rr);
+          ctx.lineTo(fx.rx + Math.cos(a) * (rr + len), fx.ryy + Math.sin(a) * (rr + len));
+        }
+        ctx.stroke();
+      }
     }
     if (fx.pulse > 0.01) {
       ctx.fillStyle = `rgba(255,240,215,${0.22 * fx.pulse})`;

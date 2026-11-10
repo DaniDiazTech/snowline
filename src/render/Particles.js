@@ -13,7 +13,7 @@
  */
 import { createRandom } from '../math/random.js';
 
-export const PK = Object.freeze({ PUFF: 0, SPARKLE: 1, SHARD: 2, SPARK: 3, RING: 4, EMBER: 5, FEATHER: 6, CONFETTI: 7 });
+export const PK = Object.freeze({ PUFF: 0, SPARKLE: 1, SHARD: 2, SPARK: 3, RING: 4, EMBER: 5, FEATHER: 6, CONFETTI: 7, HAT: 8 });
 const MAX = 1400;
 const TAU = Math.PI * 2;
 
@@ -166,6 +166,15 @@ export class Particles {
         ctx.rotate(this.rot[i]);
         ctx.scale(Math.cos(this.rot[i] * 2.3), 1); // flutter: the paper flips
         ctx.fillRect(-s / 2, -s * 0.3, s, s * 0.6);
+        ctx.restore();
+      } else if (k === PK.HAT) {
+        // the snowman's top hat, tumbling away
+        ctx.globalAlpha = Math.min(1, u * 4);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(this.rot[i] * 0.6);
+        ctx.fillRect(-s, s * 0.35, s * 2, s * 0.3);
+        ctx.fillRect(-s * 0.62, -s * 0.75, s * 1.24, s * 1.12);
         ctx.restore();
       } else if (k === PK.FEATHER) {
         ctx.globalAlpha = Math.sin(u * Math.PI) * 0.9;

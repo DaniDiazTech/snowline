@@ -73,7 +73,7 @@ export class Bot {
     this.grindPlannedFor = -1;
     this.maxFlips = !this.opts.flips ? 0 : this.opts.maxFlips ?? (this.skill >= 0.85 ? 3 : this.skill >= 0.5 ? 2 : 1);
     this.jitterTicks = Math.round((1 - this.skill) * 4);
-    this.releaseErr = (1 - this.skill) * 0.5; // rad
+    this.releaseErr = (1 - this.skill) * 0.3; // rad
     this.lateChance = (1 - this.skill) * 0.22; // chance of reacting late to a hazard
   }
 
@@ -107,7 +107,7 @@ export class Bot {
   }
 
   scheduleTrick(tick) {
-    const delay = lerp(2.2, 0.12, this.skill) * this.rng.range(0.6, 1.5);
+    const delay = lerp(3.5, 0.3, this.skill) * this.rng.range(0.6, 1.5);
     this.nextTrickTick = tick + Math.round(delay / TICK_DT);
   }
 

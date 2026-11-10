@@ -20,6 +20,9 @@ const BOT_SKILLS = [0.55, 0.3, 0.75, 0.42, 0.65, 0.2];
 /** Never simulate more than this per frame; a longer backlog is spread over the next frames. */
 const MAX_TICKS_PER_FRAME = 240;
 const START_SLOT_PX = 30;
+/** After GO the start-line stagger melts away over this long instead of snapping. */
+const SLOT_FADE_MS = 700;
+const slotFade = (idle, raceMs) => (idle ? 1 : clamp(1 - raceMs / SLOT_FADE_MS, 0, 1));
 
 function lerpAngle(a, b, t) {
   let d = (b - a) % (Math.PI * 2);
@@ -60,7 +63,7 @@ class Runner {
       name: this.name,
       color: PLAYER_COLORS[this.colorIndex] ?? PLAYER_COLORS[0],
       isLocal: this.isLocal,
-      x: lerp(this.prev.x, s.x, a) - (idle ? slot * START_SLOT_PX : 0),
+      x: lerp(this.prev.x, s.x, a) - slot * START_SLOT_PX * slotFade(idle, s.tick * TICK_MS),
       y: lerp(this.prev.y, s.y, a),
       vx: s.vx,
       vy: s.vy,
@@ -230,9 +233,10 @@ export class Race {
     const others = [];
     for (const b of this.bots) others.push(b.view(this.alpha, slots.get(b.id) ?? 0));
     for (const [id, { info, ghost }] of this.remotes) {
+      if (this.remotes.get(id).gone) continue;
       const pose = ghost.sample(nowMs, this.course);
       if (!pose) continue;
-      if (pose.mode === RiderMode.IDLE) pose.x -= (slots.get(id) ?? 0) * START_SLOT_PX;
+      pose.x -= (slots.get(id) ?? 0) * START_SLOT_PX * slotFade(pose.mode === RiderMode.IDLE, pose.t);
       others.push({ id, name: info.name, color: PLAYER_COLORS[info.colorIndex] ?? PLAYER_COLORS[0], isLocal: false, ...pose });
     }
     return { local, others };
@@ -247,8 +251,9 @@ export class Race {
     for (const b of this.bots) {
       rows.push({ id: b.id, name: b.name, color: PLAYER_COLORS[b.colorIndex], progress: clamp(b.sim.state.progress, 0, 1), isLocal: false, finished: b.sim.state.finishTick >= 0 });
     }
-    for (const [id, { info, ghost }] of this.remotes) {
+    for (const [id, { info, ghost, gone }] of this.remotes) {
       const finished = this.finishTimes.has(id);
+      if (gone && !finished) continue;
       rows.push({ id, name: info.name, color: PLAYER_COLORS[info.colorIndex] ?? PLAYER_COLORS[0], progress: finished ? 1 : clamp((ghost.x - startX) / length, 0, 1), isLocal: false, finished });
     }
     return rows;
