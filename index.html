@@ -3,21 +3,113 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <title>Snowline</title>
-    <meta name="description" content="A downhill snowboard race with friends. Share a code, pick a scarf, race down the mountain — in your browser." />
+    <title>Snowline · a downhill race with friends</title>
+    <meta name="description" content="A downhill snowboard race you play with friends in the browser. Share a room code and race down the same mountain." />
     <meta name="theme-color" content="#cfe0ec" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Snowline" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta property="og:title" content="Snowline" />
-    <meta property="og:description" content="A downhill race with friends." />
-    <meta property="og:image" content="assets/og.png" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Snowline" />
+    <meta property="og:title" content="Snowline · a downhill race with friends" />
+    <meta property="og:description" content="Share a room code and race your friends down the same mountain. You only need one button." />
+    <meta property="og:url" content="https://danidiaztech.github.io/snowline/" />
+    <meta property="og:image" content="https://danidiaztech.github.io/snowline/assets/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="A snowboarder with a red scarf riding down a snowy mountain at sunset" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Snowline · a downhill race with friends" />
+    <meta name="twitter:description" content="Share a room code and race your friends down the same mountain." />
+    <meta name="twitter:image" content="https://danidiaztech.github.io/snowline/assets/og.png" />
     <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="assets/icon-192.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300;1,9..144,400&family=Jost:wght@300;400;500&display=swap" rel="stylesheet" />
+    <!-- Fredoka (display) + Nunito (text, tabular numerals); weights trimmed to the ones style.css uses -->
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&amp;family=Nunito:wght@400;500;700;800&amp;display=swap" />
+    <!-- not render-blocking: the boot screen paints at once, the faces swap in when they arrive -->
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&amp;family=Nunito:wght@400;500;700;800&amp;display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&amp;family=Nunito:wght@400;500;700;800&amp;display=swap" rel="stylesheet" /></noscript>
     <link rel="stylesheet" href="style.css" />
+    <!-- The whole static import graph, fetched in parallel instead of one import level per round trip.
+         Keep in sync with src/ (snowline-tests/perf/load.mjs lists missing / stale entries). -->
+    <link rel="modulepreload" href="src/main.js" />
+    <link rel="modulepreload" href="src/core/Game.js" />
+    <link rel="modulepreload" href="src/contracts.js" />
+    <link rel="modulepreload" href="src/math/random.js" />
+    <link rel="modulepreload" href="src/world/Course.js" />
+    <link rel="modulepreload" href="src/math/perlin.js" />
+    <link rel="modulepreload" href="src/math/splines.js" />
+    <link rel="modulepreload" href="src/math/utils.js" />
+    <link rel="modulepreload" href="src/math/physics.js" />
+    <link rel="modulepreload" href="src/net/Room.js" />
+    <link rel="modulepreload" href="src/net/emitter.js" />
+    <link rel="modulepreload" href="src/net/clock.js" />
+    <link rel="modulepreload" href="src/net/Transport.js" />
+    <link rel="modulepreload" href="src/net/brokers.js" />
+    <link rel="modulepreload" href="src/store/WinnersStore.js" />
+    <link rel="modulepreload" href="src/core/Race.js" />
+    <link rel="modulepreload" href="src/sim/RiderSim.js" />
+    <link rel="modulepreload" href="src/sim/simConfig.js" />
+    <link rel="modulepreload" href="src/sim/Bot.js" />
+    <link rel="modulepreload" href="src/sim/netState.js" />
+    <link rel="modulepreload" href="src/core/Ghost.js" />
+    <link rel="modulepreload" href="src/render/Renderer.js" />
+    <link rel="modulepreload" href="src/render/DayCycle.js" />
+    <link rel="modulepreload" href="src/render/color.js" />
+    <link rel="modulepreload" href="src/render/Camera.js" />
+    <link rel="modulepreload" href="src/render/TerrainRenderer.js" />
+    <link rel="modulepreload" href="src/render/canvas.js" />
+    <link rel="modulepreload" href="src/render/Sky.js" />
+    <link rel="modulepreload" href="src/render/Parallax.js" />
+    <link rel="modulepreload" href="src/render/DecorRenderer.js" />
+    <link rel="modulepreload" href="src/render/FeatureRenderer.js" />
+    <link rel="modulepreload" href="src/render/RiderRenderer.js" />
+    <link rel="modulepreload" href="src/render/Particles.js" />
+    <link rel="modulepreload" href="src/render/Weather.js" />
+    <link rel="modulepreload" href="src/render/Effects.js" />
+    <link rel="modulepreload" href="src/audio/AudioEngine.js" />
+    <link rel="modulepreload" href="src/audio/dsp.js" />
+    <link rel="modulepreload" href="src/audio/Music.js" />
+    <link rel="modulepreload" href="src/audio/Layers.js" />
+    <link rel="modulepreload" href="src/audio/Sfx.js" />
+    <link rel="modulepreload" href="src/audio/Voices.js" />
+    <link rel="modulepreload" href="src/ui/UI.js" />
+    <link rel="modulepreload" href="src/ui/dom.js" />
+    <link rel="modulepreload" href="src/ui/icons.js" />
+    <link rel="modulepreload" href="src/ui/HomeView.js" />
+    <link rel="modulepreload" href="src/ui/LobbyView.js" />
+    <link rel="modulepreload" href="src/ui/format.js" />
+    <link rel="modulepreload" href="src/ui/qr.js" />
+    <link rel="modulepreload" href="src/ui/HudView.js" />
+    <link rel="modulepreload" href="src/ui/ResultsView.js" />
+    <link rel="modulepreload" href="src/ui/FameModal.js" />
+    <link rel="modulepreload" href="src/ui/InputSurface.js" />
+    <link rel="modulepreload" href="src/ui/SettingsModal.js" />
+    <link rel="modulepreload" href="src/ui/Modal.js" />
+    <link rel="modulepreload" href="src/ui/Onboarding.js" />
+    <link rel="modulepreload" href="src/ui/ConfirmModal.js" />
+    <!-- Boot screen: painted on the first frame, removed by main.js when the game is ready. -->
+    <style>
+      #boot { position: fixed; inset: 0; z-index: 50; display: grid; place-content: center; justify-items: center; gap: 22px;
+        background: linear-gradient(#a9c4dc, #e7d6cb 70%, #f4e4d6); color: #172031; font: 700 13px/1 'Nunito', 'Avenir Next', system-ui, sans-serif;
+        letter-spacing: 0.24em; text-transform: uppercase; transition: opacity 0.5s; }
+      #boot b { font: 600 clamp(34px, 8vw, 72px)/1 'Fredoka', 'Nunito', system-ui, sans-serif; letter-spacing: 0.1em; margin-right: -0.1em; }
+      #boot i { position: relative; width: 120px; height: 2px; overflow: hidden; border-radius: 1px; background: rgba(23, 32, 49, 0.12); }
+      #boot i::after { content: ''; position: absolute; inset: 0; width: 40%; background: #172031; animation: boot 1.2s cubic-bezier(0.6, 0, 0.4, 1) infinite; }
+      @keyframes boot { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+      @media (prefers-reduced-motion: reduce) { #boot i::after { animation-duration: 3s; } }
+    </style>
   </head>
   <body>
+    <div id="boot" aria-live="polite"><b>Snowline</b><i></i><span>Loading the mountain</span></div>
+
     <!-- p5.js world canvas (full viewport, behind everything) -->
     <div id="stage" aria-hidden="true"></div>
 
@@ -26,8 +118,9 @@
 
     <noscript>Snowline needs JavaScript to run.</noscript>
 
-    <!-- Libraries (vendored, so the game also works offline) -->
-    <script src="lib/p5.min.js"></script>
+    <!-- Libraries (vendored, so the game also works offline). defer: does not block the first paint,
+         still runs before the module below (document order). -->
+    <script defer src="lib/p5.min.js"></script>
     <script type="module" src="src/main.js"></script>
   </body>
 </html>

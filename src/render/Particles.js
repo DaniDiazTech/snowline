@@ -33,6 +33,8 @@ export class Particles {
     this.kind = new Uint8Array(MAX);
     this.col = new Uint8Array(MAX); // 0 snow, 1 shade, 2 rock, 3 warm, 4 white, 5 gold, 6 player
     this.alive = 0; // number of live particles (packed at the front)
+    /** fraction of the pool usable (quality governor) */
+    this.budget = 1;
     this.rng = createRandom(12345);
   }
 
@@ -45,7 +47,7 @@ export class Particles {
   }
 
   spawn(kind, x, y, vx, vy, life, size, col = 0, grav = 0, drag = 1.5) {
-    if (this.alive >= MAX || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(vx) || !Number.isFinite(vy)) return;
+    if (this.alive >= MAX * this.budget || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(vx) || !Number.isFinite(vy)) return;
     const i = this.alive++;
     this.kind[i] = kind;
     this.x[i] = x;

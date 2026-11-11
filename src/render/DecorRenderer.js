@@ -328,7 +328,45 @@ function pole(ctx, d, s, C, P) {
   flagShape(ctx, 1.5 * s, -h, 22 * s, 13 * s, P.t, d.x * 0.1, 2.5 * s * (1 + P.wind));
 }
 
+/** Distance board before the finish: posts, a snow-capped plank with the metres to go. */
+function distanceBoard(ctx, d, s0, C, P) {
+  const m = d.variant | 0;
+  const s = s0 * 1.7; // readable at race speed
+  const bw = 58 * s;
+  const bh = 30 * s;
+  const h = 64 * s;
+  const wood = mix([150, 104, 66], C.silArr, 0.25 + 0.35 * P.night);
+  ctx.fillStyle = C.sil;
+  ctx.fillRect(-bw * 0.36, -h, 3.2 * s, h + 6);
+  ctx.fillRect(bw * 0.36 - 3.2 * s, -h, 3.2 * s, h + 6);
+  ctx.fillStyle = rgba(wood);
+  ctx.fillRect(-bw / 2, -h - 4 * s, bw, bh);
+  ctx.fillStyle = rgba(mix(P.snow, [255, 255, 255], 0.3));
+  ctx.fillRect(-bw / 2 + 3 * s, -h - 1 * s, bw - 6 * s, bh - 6 * s);
+  // snow cap
+  ctx.fillStyle = C.snow;
+  ctx.beginPath();
+  ctx.roundRect(-bw / 2 - 2 * s, -h - 7 * s, bw + 4 * s, 5 * s, 2.5 * s);
+  ctx.fill();
+  // number + a small chequered strip
+  ctx.fillStyle = C.sil;
+  // the 15 px font / centring are set once by the renderer for the board pass: scale the text
+  ctx.save();
+  ctx.translate(0, -h + bh * 0.33);
+  ctx.scale(s, s);
+  ctx.fillText(`${m} m`, 0, 0);
+  ctx.restore();
+  for (let i = 0; i < 8; i++) {
+    ctx.fillStyle = i % 2 ? C.sil : rgba(mix(P.snow, [255, 255, 255], 0.5));
+    ctx.fillRect(-bw / 2 + 3 * s + (i * (bw - 6 * s)) / 8, -h + bh - 9 * s, (bw - 6 * s) / 8, 3 * s);
+  }
+}
+
 function banner(ctx, d, s, C, P) {
+  if ((d.variant | 0) >= 50) {
+    distanceBoard(ctx, d, s, C, P);
+    return;
+  }
   const h = 118 * s;
   ctx.fillStyle = C.sil;
   ctx.fillRect(-1.8 * s, -h, 3.6 * s, h + 4);

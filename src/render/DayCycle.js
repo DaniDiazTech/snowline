@@ -3,8 +3,12 @@
  *
  *   sampleAtmosphere(timeMs, course) → Atmosphere      (pure, no state)
  *
- * The in-world clock runs a full 24 h cycle every CYCLE_MS of race time, so a
- * race travels through several moods. Moods are keyframes on the cycle phase
+ * Pacing: a race should have ONE dominant mood and at most one transition. The start time picks
+ * an arc (dawn→day, day, golden→dusk, dusk→night, night); during the expected race time
+ * T = course.length / 20 m/s the phase holds the first mood for ~40 % of T and then eases into
+ * the second by ~95 % of T. After that (long runs, home/lobby backdrop) the clock keeps going at
+ * a cycle length of 2.5 × T. 'auto' favours the photogenic transitions (golden→dusk, dusk→night,
+ * dawn→day). Moods are keyframes on the cycle phase
  * (0..1). A few "helper" keys (morning, twilight, predawn) sit between the
  * big moods so a blend never passes through a muddy grey; between keys the
  * colours are mixed in OKLab with a smoothstep, which also makes every mood
@@ -19,7 +23,51 @@
 import { clamp, lerp, smoothstep } from '../math/utils.js';
 import { hex, rgbToOklab, oklabToRgb, toHex, mix, desaturate, scale } from './color.js';
 
-export const CYCLE_MS = 150000;
+export const CYCLE_MS = 150000; // fallback cycle when the course has no length
+
+/** Race arcs: [from phase, to phase]. */
+export const ARCS = Object.freeze({
+  dawn: [0.0, 0.2], // dawn → day
+  day: [0.2, 0.37], // day holds
+  golden: [0.47, 0.585], // golden → dusk
+  dusk: [0.585, 0.76], // dusk → night (through twilight)
+  night: [0.78, 0.9], // night holds
+});
+const AUTO_ARCS = [
+  ['golden', 0.3],
+  ['dusk', 0.3],
+  ['dawn', 0.25],
+  ['day', 0.1],
+  ['night', 0.05],
+];
+
+/** Expected race time in s for a course (nominal 20 m/s = 480 px/s). */
+export function expectedRaceS(course) {
+  return course?.length > 0 ? course.length / 480 : 120;
+}
+
+/** Arc used by a course (explicit start time, or a seed-derived photogenic pick for 'auto'). */
+export function arcOf(course) {
+  const st = course?.settings?.startTime ?? 'auto';
+  if (st in ARCS) return ARCS[st];
+  let r = hash01(course?.seed ?? 1, 77);
+  for (const [name, p] of AUTO_ARCS) {
+    if (r < p) return ARCS[name];
+    r -= p;
+  }
+  return ARCS.golden;
+}
+
+/** Cycle phase (0..1) at a race time. Pure. */
+export function phaseAt(timeMs, course) {
+  const [from, to] = arcOf(course);
+  const T = expectedRaceS(course) * 1000;
+  const u = timeMs / T;
+  let ph;
+  if (u <= 1) ph = from + (to - from) * smoothstep(0.4, 0.95, Math.max(0, u));
+  else ph = to + (timeMs - T) / (2.5 * T);
+  return ((ph % 1) + 1) % 1;
+}
 const WEATHER_SEG_MS = 42000;
 const WEATHER_FADE_MS = 9000;
 const FLASH_SLOT_MS = 1900;
@@ -207,7 +255,7 @@ const labScratch = [0, 0, 0];
  * @returns {import('../contracts.js').Atmosphere}
  */
 export function sampleAtmosphere(timeMs, course) {
-  const phase = (((startPhase(course) + timeMs / CYCLE_MS) % 1) + 1) % 1;
+  const phase = phaseAt(timeMs, course);
 
   // Find the surrounding keyframes.
   let i = KEYS.length - 1;

@@ -5,9 +5,24 @@
  * or W → onInput(true); release → onInput(false). Only emits on changes,
  * ignores key auto-repeat, and force-releases on blur / tab hide / pointer
  * cancel so the button can never stick. Inactive unless enable() was called.
+ *
+ * onChange(held, t) also gets the time of the edge (the DOM event's timeStamp, in the
+ * performance.now() timebase), so the simulation can apply it at the tick it really happened
+ * on even when the event is dispatched late (after a slow frame).
+ *
+ * The listeners that must be able to preventDefault (touch, selection, context menu) are only
+ * attached while racing: a non-passive touch listener on window makes every scroll on the
+ * menus wait for the main thread.
  */
 const KEYS = new Set(['Space', 'ArrowUp', 'KeyW']);
 const INTERACTIVE = 'button, a, input, select, textarea, label, [role="dialog"], [data-ui-interactive]';
+
+/** event.timeStamp when it is a sane performance.now() time, else now. */
+function eventTime(e) {
+  const now = performance.now();
+  const t = e && e.timeStamp;
+  return typeof t === 'number' && t > 0 && t <= now + 1 && now - t < 1000 ? t : now;
+}
 
 export class InputSurface {
   /** @param {(held:boolean)=>void} onChange */
@@ -24,24 +39,25 @@ export class InputSurface {
       if (e.target instanceof Element && e.target.closest(INTERACTIVE)) return;
       if (e.cancelable) e.preventDefault(); // no text selection, no synthetic mouse, no focus steal
       this.pointers.add(e.pointerId);
-      this._sync();
+      this._sync(eventTime(e));
     };
     this._up = (e) => {
       if (!this.pointers.delete(e.pointerId)) return;
-      this._sync();
+      this._sync(eventTime(e));
     };
     this._keyDown = (e) => {
       if (!this.active || !KEYS.has(e.code)) return;
-      if (e.target instanceof Element && e.target.closest('input, textarea, select')) return;
+      // Typing in a field, or using a dialog's buttons (settings mid-race), is not riding.
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [role="dialog"]')) return;
       e.preventDefault(); // no page scroll, no button activation
       if (e.repeat || this.keys.has(e.code)) return;
       this.keys.add(e.code);
-      this._sync();
+      this._sync(eventTime(e));
     };
     this._keyUp = (e) => {
       if (!this.keys.delete(e.code)) return;
       e.preventDefault();
-      this._sync();
+      this._sync(eventTime(e));
     };
     this._release = () => this.releaseAll();
     this._visibility = () => {
@@ -58,6 +74,11 @@ export class InputSurface {
     window.addEventListener('keyup', this._keyUp);
     window.addEventListener('blur', this._release);
     document.addEventListener('visibilitychange', this._visibility);
+  }
+
+  enable() {
+    if (this.active) return;
+    this.active = true;
     // Long-press menus, selection and iOS touch gestures while racing.
     window.addEventListener('contextmenu', this._block);
     window.addEventListener('selectstart', this._block);
@@ -65,13 +86,18 @@ export class InputSurface {
     window.addEventListener('touchmove', this._block, { passive: false });
   }
 
-  enable() {
-    this.active = true;
-  }
-
   disable() {
     this.releaseAll();
+    if (!this.active) return;
     this.active = false;
+    this._unblock();
+  }
+
+  _unblock() {
+    window.removeEventListener('contextmenu', this._block);
+    window.removeEventListener('selectstart', this._block);
+    window.removeEventListener('touchstart', this._block);
+    window.removeEventListener('touchmove', this._block);
   }
 
   releaseAll() {
@@ -80,11 +106,11 @@ export class InputSurface {
     this._sync();
   }
 
-  _sync() {
+  _sync(t = performance.now()) {
     const held = this.active && (this.pointers.size > 0 || this.keys.size > 0);
     if (held === this.held) return;
     this.held = held;
-    this.onChange(held);
+    this.onChange(held, t);
   }
 
   destroy() {
@@ -96,9 +122,6 @@ export class InputSurface {
     window.removeEventListener('keyup', this._keyUp);
     window.removeEventListener('blur', this._release);
     document.removeEventListener('visibilitychange', this._visibility);
-    window.removeEventListener('contextmenu', this._block);
-    window.removeEventListener('selectstart', this._block);
-    window.removeEventListener('touchstart', this._block);
-    window.removeEventListener('touchmove', this._block);
+    this._unblock();
   }
 }

@@ -11,7 +11,29 @@
  *   });
  *
  * Additive extras beyond the agreed API: setTone(), setTrickAnchor(), openFame(), closeFame(), destroy().
+ *
+ * Additive (ready-for-players pass):
+ *   setPrefs({quality, volume, reduceFx, muted, qualityApi})   settings dialog state (also sets
+ *                                   <html data-reduce-fx> for calmer CSS)
+ *   openSettings() / closeSettings()                            the gear dialog (also from the corner gear)
+ *   showOnboarding({waiting, onDone}) / closeOnboarding()       first-run how-to
+ *   confirm({title, body, ok, cancel}) → Promise<boolean>       yes/no dialog
+ *   notify(text, tone='info'|'good'|'bad')                     non-error toast (menus)
+ *   setRejoin({code, name} | null)                              home: one-tap "Rejoin as <name>"
+ *   setFps(text | null)                                         debug corner (?fps=1)
+ *   setRiderColor(colorIndex)                                   HUD scarf ribbon colour
+ *   crashLabel(text)                                            short crash reason next to the rider
+ *   setClosing(msLeft | null)                                   "Race closes in 0:24" chip
+ *   setWatching({name, place} | null)                           spectating chip; shrinks the finish card
+ *   updateHud(hud) also takes {gaps: {ahead, behind}, tailwind}
+ *   setResults(view) also takes {awards, journey, practice, hostName}
+ *   setLobby(view) also takes {takenColors}
+ *   handlers: onChangeSettings(), onRemovePlayer(id, name)
+ *   setLobby(view) also takes {inProgress, live: [{id,name,color,progress,finished}]}
+ *   handlers: onPrefs(partial), onQualityInfo() → info|null, onModal(open), onRejoin(), onReplayTutorial(),
+ *             onInput(held, t)  — t is the input event's timeStamp (performance.now() timebase)
  */
+import { PLAYER_COLORS } from '../contracts.js';
 import { h, icon } from './dom.js';
 import { ICONS } from './icons.js';
 import { HomeView } from './HomeView.js';
@@ -20,6 +42,9 @@ import { HudView } from './HudView.js';
 import { ResultsView } from './ResultsView.js';
 import { FameModal } from './FameModal.js';
 import { InputSurface } from './InputSurface.js';
+import { SettingsModal } from './SettingsModal.js';
+import { Onboarding } from './Onboarding.js';
+import { ConfirmModal } from './ConfirmModal.js';
 
 const SCREENS = ['home', 'lobby', 'race', 'results'];
 const LEAVE_MS = 420;
@@ -54,6 +79,19 @@ export class UI {
     this.fame = new FameModal(hooks);
     this.views = { home: this.home, lobby: this.lobby, race: this.hud, results: this.results };
 
+    // Dialogs. Game is told when any is open (it freezes the backdrop scene behind them).
+    this._open = new Set();
+    const track = (name) => (open) => {
+      if (open) this._open.add(name);
+      else this._open.delete(name);
+      document.documentElement.toggleAttribute('data-modal', this._open.size > 0);
+      this.handlers.onModal?.(this._open.size > 0);
+    };
+    this.fame.onToggle = track('fame');
+    this.settings = new SettingsModal(hooks, track('settings'));
+    this.onboarding = new Onboarding(track('onboarding'));
+    this.confirmer = new ConfirmModal(track('confirm'));
+
     // Corner chrome: connection + mute (always available).
     this.connEl = h('span', { class: 'conn', 'data-testid': 'connection', 'data-status': 'online', role: 'status', 'aria-live': 'polite' }, h('span', { class: 'conn__dot' }), h('span', { class: 'conn__label' }));
     this.muteBtn = h(
@@ -61,11 +99,37 @@ export class UI {
       { class: 'icon-btn icon-btn--glass', type: 'button', 'aria-label': 'Mute sound', 'aria-pressed': 'false', title: 'Sound (M)', 'data-testid': 'mute', onclick: () => this.handlers.onToggleMute?.() },
       h('span', { class: 'swap' }, icon(ICONS.soundOn, 'icon swap__a'), icon(ICONS.soundOff, 'icon swap__b'))
     );
-    const chrome = h('div', { class: 'chrome' }, this.connEl, this.muteBtn);
+    this.gearBtn = h(
+      'button',
+      { class: 'icon-btn icon-btn--glass', type: 'button', 'aria-label': 'Settings', title: 'Settings', 'aria-haspopup': 'dialog', 'data-testid': 'open-settings', onclick: () => this.openSettings() },
+      icon(ICONS.gear)
+    );
+    // Fullscreen: touch devices only (desktop has F11), where the API exists (not iPhone Safari).
+    const fsTarget = document.documentElement;
+    const canFs = !!(fsTarget.requestFullscreen || fsTarget.webkitRequestFullscreen) && (document.fullscreenEnabled || document.webkitFullscreenEnabled) && matchMedia('(pointer: coarse)').matches;
+    this.fsBtn = canFs
+      ? h(
+          'button',
+          { class: 'icon-btn icon-btn--glass', type: 'button', 'aria-label': 'Full screen', title: 'Full screen', 'aria-pressed': 'false', 'data-testid': 'fullscreen', onclick: () => this._toggleFullscreen() },
+          h('span', { class: 'swap' }, icon(ICONS.expand, 'icon swap__a'), icon(ICONS.shrink, 'icon swap__b'))
+        )
+      : null;
+    if (canFs) {
+      const sync = () => {
+        const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        this.fsBtn.setAttribute('aria-pressed', String(on));
+        this.fsBtn.classList.toggle('is-done', on);
+      };
+      document.addEventListener('fullscreenchange', sync);
+      document.addEventListener('webkitfullscreenchange', sync);
+    }
+    const chrome = h('div', { class: 'chrome' }, this.connEl, this.fsBtn, this.gearBtn, this.muteBtn);
 
     this.toasts = h('div', { class: 'toasts', 'aria-live': 'assertive' });
+    this.fpsEl = h('div', { class: 'fps-corner', 'data-testid': 'fps', 'aria-hidden': 'true', hidden: true });
+    this.rotateEl = h('div', { class: 'rotate-hint', 'data-testid': 'rotate-hint', role: 'note' }, icon(ICONS.rotate, 'icon'), h('span', {}, 'Turn your phone sideways. Snowline plays best that way.'));
 
-    root.append(this.home.el, this.lobby.el, this.hud.el, this.results.el, chrome, this.fame.el, this.toasts);
+    root.append(this.home.el, this.lobby.el, this.hud.el, this.results.el, chrome, this.rotateEl, this.fame.el, this.settings.el, this.onboarding.el, this.confirmer.el, this.toasts, this.fpsEl);
 
     this.input = new InputSurface((held) => this.handlers.onInput?.(held));
     this._keys = (e) => {
@@ -108,6 +172,7 @@ export class UI {
       if (prev !== 'race') this.hud.reset();
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); // Space must not "click" a focused button
       this.fame.close();
+      this.confirmer.modal.open && this.confirmer._answer(false);
       this.input.enable();
     } else {
       this.input.disable();
@@ -125,6 +190,12 @@ export class UI {
 
   setProfile(profile) {
     this.home.setProfile(profile);
+    if (Number.isInteger(profile?.colorIndex)) this.setRiderColor(profile.colorIndex);
+  }
+
+  /** Additive: the HUD's scarf ribbon wears the local rider's colour. */
+  setRiderColor(colorIndex) {
+    this.hud.el.style.setProperty('--scarf', PLAYER_COLORS[colorIndex] ?? PLAYER_COLORS[0]);
   }
 
   setJoinCode(code) {
@@ -135,8 +206,28 @@ export class UI {
     this.home.setBusy(busy, label);
   }
 
+  /** Additive: home shows a one-tap "Rejoin as <name>" (null hides it). */
+  setRejoin(info) {
+    this.home.setRejoin(info);
+  }
+
   showError(message) {
-    const toast = h('div', { class: 'toast toast--error', role: 'alert', 'data-testid': 'error-toast' }, h('span', { class: 'toast__dot' }), h('span', {}, String(message)));
+    this._toast(message, 'error');
+  }
+
+  /** Additive: a non-error toast (host changes, reconnects…). */
+  notify(message, tone = 'info') {
+    this._toast(message, tone === 'bad' ? 'warn' : tone);
+  }
+
+  _toast(message, kind) {
+    const error = kind === 'error';
+    const toast = h(
+      'div',
+      { class: `toast toast--${kind}`, role: error ? 'alert' : 'status', 'data-testid': error ? 'error-toast' : 'notice-toast' },
+      h('span', { class: 'toast__dot' }),
+      h('span', {}, String(message))
+    );
     const dismiss = () => {
       toast.classList.add('is-out');
       setTimeout(() => toast.remove(), 300);
@@ -144,7 +235,7 @@ export class UI {
     toast.addEventListener('click', dismiss);
     while (this.toasts.children.length >= 3) this.toasts.firstElementChild.remove();
     this.toasts.append(toast);
-    setTimeout(dismiss, 4500);
+    setTimeout(dismiss, error ? Math.max(4500, String(message).length * 70) : 3200);
   }
 
   /** @param {'connecting'|'online'|'offline'} status */
@@ -183,6 +274,18 @@ export class UI {
     this.hud.setTrickAnchor(x, y);
   }
 
+  crashLabel(text) {
+    this.hud.crashLabel(text);
+  }
+
+  setClosing(msLeft) {
+    this.hud.setClosing(msLeft);
+  }
+
+  setWatching(info) {
+    this.hud.setWatching(info);
+  }
+
   comboBanked(total, mult, boostLevel) {
     this.hud.comboBanked(total, mult, boostLevel);
   }
@@ -209,12 +312,69 @@ export class UI {
   /** Opens the hall-of-fame dialog and asks Game for data (onOpenFame). */
   openFame() {
     if (this.screen === 'race') return;
+    this.settings.close();
     this.fame.show();
     this.handlers.onOpenFame?.();
   }
 
   closeFame() {
     this.fame.close();
+  }
+
+  /* ================= settings / onboarding / dialogs (additive) ================= */
+
+  setPrefs(prefs) {
+    this.settings.setPrefs(prefs);
+  }
+
+  openSettings() {
+    this.fame.close();
+    this.settings.show();
+  }
+
+  closeSettings() {
+    this.settings.close();
+  }
+
+  showOnboarding(opts) {
+    this.onboarding.show(opts);
+  }
+
+  closeOnboarding() {
+    this.onboarding.close();
+  }
+
+  /** @returns {Promise<boolean>} */
+  confirm(opts) {
+    return this.confirmer.ask(opts);
+  }
+
+  /** Debug corner (?fps=1). null hides it. */
+  setFps(text) {
+    const el = this.fpsEl;
+    if (text === null || text === undefined) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  _toggleFullscreen() {
+    const doc = document;
+    const el = doc.documentElement;
+    try {
+      if (doc.fullscreenElement || doc.webkitFullscreenElement) (doc.exitFullscreen || doc.webkitExitFullscreen).call(doc);
+      else {
+        const p = (el.requestFullscreen || el.webkitRequestFullscreen).call(el, { navigationUI: 'hide' });
+        // The game is landscape: lock it there when the browser allows (Android Chrome, in fullscreen).
+        Promise.resolve(p)
+          .then(() => screen.orientation?.lock?.('landscape'))
+          .catch(() => {});
+      }
+    } catch {
+      /* not allowed */
+    }
   }
 
   setMuted(muted) {

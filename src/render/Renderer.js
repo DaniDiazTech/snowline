@@ -12,6 +12,27 @@
  *
  * Everything ambient runs off frame.timeMs so clients (and screenshots) agree.
  * Uses the raw Canvas2D context (p.drawingContext) for speed; p5 is only the host.
+ *
+ * Performance
+ *   The whole background (sky, sun/moon, clouds, 5 ridge layers, mist, valley haze) is drawn
+ *   into an offscreen buffer at reduced resolution (≤ 1 CSS px per px, lower on weak devices)
+ *   and blitted once; only the playfield is drawn at full pixel density.
+ *
+ * Quality API (for the settings UI)
+ *   renderer.quality            → { mode, level, name, pixelDensity, fps }   (read-only snapshot)
+ *   renderer.setQuality(mode)   mode: 'auto' (default) | 'high' | 'medium' | 'low'
+ *   In 'auto' a governor watches the smoothed frame time and steps through QUALITY_LEVELS
+ *   (pixel density 2 → 1.5 → 1.25 → 1 → 0.75 → 0.6, then particles, foreground pines, weather density,
+ *   fog bands, vignette, background resolution) to hold ~60 fps, with hysteresis: it steps down
+ *   after ~0.7 s over budget, up only after ~4 s with headroom, and backs off from a level that
+ *   failed (10 s, doubling). It starts conservatively at density min(devicePixelRatio, 1.5).
+ *   renderer.setFrameInterval(ms)  the frame budget the caller is drawing at (default 16.7; e.g. 33.3
+ *                                  for a 30 fps menu backdrop): the governor steps down above ~1.17×
+ *                                  that budget and up below ~1.03× with draw-time headroom.
+ *   renderer.setReducedEffects(on) calm mode for players who want less motion: no camera shake,
+ *                                  landing dip or boost zoom pulse / radial burst, lightning is a soft
+ *                                  sky brightening instead of a white-out, gentler confetti; the scarf
+ *                                  glow and a mild boost streak remain.
  */
 import { clamp, smoothstep } from '../math/utils.js';
 import { BODY_CENTER } from '../math/physics.js';
@@ -28,8 +49,26 @@ import { Particles, PK } from './Particles.js';
 import { Weather } from './Weather.js';
 import { Effects } from './Effects.js';
 import { hex, mix, rgba, scale } from './color.js';
+import { makeCanvas, sizeCanvas } from './canvas.js';
 
 const DECOR_MARGIN = 420;
+
+/** Quality ladder, best first. dens = max pixel density; bg = background buffer scale (CSS px). */
+export const QUALITY_LEVELS = Object.freeze([
+  { name: 'high', dens: 2, bg: 1, particles: 1, fg: true, weather: 1, vignette: true, fog: true, cols: 10 },
+  { name: 'high-1.5x', dens: 1.5, bg: 1, particles: 1, fg: true, weather: 1, vignette: true, fog: true, cols: 10 },
+  { name: 'medium', dens: 1.25, bg: 0.8, particles: 0.8, fg: true, weather: 0.8, vignette: true, fog: true, cols: 12 },
+  { name: 'medium-1x', dens: 1, bg: 0.7, particles: 0.6, fg: true, weather: 0.7, vignette: true, fog: true, cols: 14 },
+  { name: 'low', dens: 1, bg: 0.55, particles: 0.4, fg: false, weather: 0.5, vignette: false, fog: false, cols: 18 },
+  { name: 'lowest', dens: 0.75, bg: 0.45, particles: 0.3, fg: false, weather: 0.35, vignette: false, fog: false, cols: 24 },
+  // last resort for machines without GPU canvas (software raster)
+  { name: 'minimal', dens: 0.6, bg: 0.35, particles: 0.25, fg: false, weather: 0.25, vignette: false, fog: false, cols: 32 },
+]);
+const MODE_LEVEL = { high: 0, medium: 2, low: 4 };
+/** Fonts are set once per pass (assigning ctx.font is a style parse each time). */
+const BOARD_FONT = '800 15px system-ui, -apple-system, "Segoe UI", sans-serif';
+const TAG_FONT = '600 10px system-ui, -apple-system, "Segoe UI", sans-serif';
+const MARKER_FONT = '700 12px system-ui, -apple-system, "Segoe UI", sans-serif';
 const HAZARDS = new Set(['rock', 'log', 'snowman', 'spikes', 'campfire']); // world px: widest decor, so nothing pops in at the edges
 const MAX_GLOWS = 64;
 
@@ -63,6 +102,15 @@ export class Renderer {
     this.glows = { n: 0, x: new Float32Array(MAX_GLOWS), y: new Float32Array(MAX_GLOWS), r: new Float32Array(MAX_GLOWS), a: new Float32Array(MAX_GLOWS), c: new Array(MAX_GLOWS) };
     /** last frame's CPU time for the draw call, ms */
     this.lastDrawMs = 0;
+    // background buffer + quality governor
+    this.bg = makeCanvas(1, 1);
+    this.bgCtx = this.bg.getContext('2d');
+    this.qMode = 'auto';
+    const deviceDpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    this.deviceDpr = Math.min(2, deviceDpr);
+    this.level = this.deviceDpr >= 1.5 ? 1 : 0;
+    this.gov = { ft: 0, lastNow: 0, since: 0, blocked: new Float64Array(QUALITY_LEVELS.length), backoff: 10000 };
+    this.quality = { mode: 'auto', level: this.level, name: QUALITY_LEVELS[this.level].name, pixelDensity: 0, fps: 0 };
     this.setCourse(course);
     this.resize(p.width, p.height);
   }
@@ -77,6 +125,14 @@ export class Renderer {
     this.camera.rescueSpan = null;
     this.riders.reset();
     this.riders.groundAt = course ? (x) => surfaceY(course, x) : null;
+    this.riders.surfaceAt = course ? (x) => course.heightAt(x) : null;
+    // take-off puff for every rider, scaled by speed
+    this.riders.onTakeoff = (v) => {
+      const sp = Math.hypot(v.vx, v.vy);
+      const ps = this.particles;
+      const n = Math.round((v.isLocal ? 6 : 3) + (v.isLocal ? 1 : 0.4) * sp / 70);
+      for (let i = 0; i < n; i++) ps.spawn(PK.PUFF, v.x + ps.rand(-10, 6), v.y - ps.rand(0, 3), v.vx * ps.rand(0.05, 0.3) + ps.rand(-40, 30), -ps.rand(30, 90) - sp * ps.rand(0.03, 0.1), ps.rand(0.35, 0.75), ps.rand(1.6, 3.8) * (0.8 + sp / 1400), 0, 400, 3);
+    };
     this.particles.reset();
     this.camera.initialized = false;
     this.forceTint = true;
@@ -88,13 +144,77 @@ export class Renderer {
     this.height = Math.max(1, height);
     this.dpr = this.p.pixelDensity ? this.p.pixelDensity() : 1;
     this.camera.resize(this.width, this.height);
-    this.parallax.build(this.height, this.dpr);
+    // ridge strips are drawn into the ≤ 1x background buffer: build at 1x, only when the height changes
+    if (this.parallax.h !== this.height) {
+      this.parallax.build(this.height, 1);
+      this.forceTint = true;
+    }
     this.effects.resize(this.width, this.height);
-    this.forceTint = true;
   }
 
   worldToScreen(x, y) {
     return this.camera.worldToScreen(x, y);
+  }
+
+  /** Frame budget in ms the caller draws at (see the header). */
+  setFrameInterval(ms) {
+    this.frameBudget = Number.isFinite(ms) && ms > 4 ? ms : 16.7;
+    this.gov.since = 0;
+    this.gov.ft = this.frameBudget;
+  }
+
+  /** Calm mode: less motion (see the header). */
+  setReducedEffects(on) {
+    this.reduced = !!on;
+    this.camera.reduced = this.reduced;
+  }
+
+  /** 'auto' | 'high' | 'medium' | 'low' — see the header. */
+  setQuality(mode) {
+    this.qMode = mode in MODE_LEVEL || mode === 'auto' ? mode : 'auto';
+    if (this.qMode !== 'auto') this.level = MODE_LEVEL[this.qMode];
+    this.gov.since = 0;
+    this.quality.mode = this.qMode;
+  }
+
+  /** Frame-time governor + pixel density application. Runs at the start of every frame. */
+  govern() {
+    const g = this.gov;
+    const now = performance.now();
+    const gap = g.lastNow ? now - g.lastNow : 16.7;
+    g.lastNow = now;
+    if (gap < 250) {
+      g.ft = g.ft ? g.ft + (gap - g.ft) * 0.08 : gap;
+      g.since += gap;
+    }
+    const max = QUALITY_LEVELS.length - 1;
+    if (this.qMode === 'auto' && g.since > 700) {
+      const budget = this.frameBudget || 16.7;
+      if (g.ft > budget * 1.17 && this.level < max) {
+        // over budget: step down, and keep away from the failed level for a while (doubling)
+        g.blocked[this.level] = now + g.backoff;
+        g.backoff = Math.min(60000, g.backoff * 2);
+        this.level++;
+        g.since = 0;
+        g.ft = budget;
+      } else if (g.ft < budget * 1.03 && this.lastDrawMs < budget * 0.42 && g.since > 4000 && this.level > 0 && now > g.blocked[this.level - 1]) {
+        this.level--;
+        g.since = 0;
+      }
+    }
+    const q = QUALITY_LEVELS[this.level];
+    const want = Math.max(0.5, Math.min(q.dens, this.deviceDpr));
+    const p = this.p;
+    if (p.pixelDensity && Math.abs(p.pixelDensity() - want) > 0.01) p.pixelDensity(want);
+    this.particles.budget = q.particles;
+    this.terrain.colW = q.cols;
+    const Q = this.quality;
+    Q.mode = this.qMode;
+    Q.level = this.level;
+    Q.name = q.name;
+    Q.pixelDensity = p.pixelDensity ? p.pixelDensity() : 1;
+    Q.fps = g.ft ? Math.round(1000 / g.ft) : 0;
+    return q;
   }
 
   /**
@@ -125,6 +245,7 @@ export class Renderer {
     const t0 = performance.now();
     const { p, course, camera: cam } = this;
     if (!course) return;
+    const Qy = this.govern();
     if (p.width !== this.width || p.height !== this.height || (p.pixelDensity && p.pixelDensity() !== this.dpr)) this.resize(p.width, p.height);
     const ctx = p.drawingContext;
     const dpr = this.dpr;
@@ -140,8 +261,15 @@ export class Renderer {
       const f = this.chasmNear(local.x);
       if (f) cam.rescueSpan = this.spanOf(f);
     }
-    cam.update(local, course, dt, frame.timeMs, !!frame.cinematic);
+    // spectate: follow another rider when the frame asks for it (focusId), local otherwise
+    const others = frame.others || [];
+    let focus = null;
+    if (frame.focusId != null) for (const o of others) if (o.id === frame.focusId && Number.isFinite(o.x) && Number.isFinite(o.y)) focus = o;
+    const subject = focus || local;
+    cam.update(subject, course, dt, frame.timeMs, !!frame.cinematic);
     const P = this.palette(atm, t);
+    P.riderX = local.x;
+    P.riderV = Math.hypot(local.vx, local.vy);
     this.handleEvents(frame.events || [], local, P);
 
     const w = this.width;
@@ -158,6 +286,7 @@ export class Renderer {
       baseScale: cam.baseScale,
       zoom: cam.zoom,
       vshift: clamp((groundAtCam - cam.y) * cam.baseScale - 60, -200, 900) * 0.4,
+      dpr,
     };
 
     ctx.save();
@@ -167,46 +296,60 @@ export class Renderer {
     ctx.globalCompositeOperation = 'source-over';
     ctx.imageSmoothingEnabled = true;
 
+    this.mark('start');
+    // ---- background (into the reduced-resolution buffer) ----
+    const bs = Math.min(1, this.dpr) * Qy.bg;
+    sizeCanvas(this.bg, w * bs, h * bs);
+    const bctx = this.bgCtx;
+    bctx.setTransform(this.bg.width / w, 0, 0, this.bg.height / h, 0, 0);
+    bctx.globalAlpha = 1;
+    bctx.globalCompositeOperation = 'source-over';
     // ---- sky ----
     this.sky.stormDim = atm.weather === 'storm' ? Math.max(0, 1 - 1.1 * atm.weatherAmt) : atm.weather === 'fog' ? 1 - 0.5 * atm.weatherAmt : 1;
-    this.sky.drawGradient(ctx, atm, L);
-    this.sky.drawStars(ctx, atm, L);
-    this.sky.drawBodies(ctx, atm, L);
-    this.sky.drawClouds(ctx, atm, L, 0);
-    this.sky.drawBirds(ctx, atm, L);
+    this.sky.drawGradient(bctx, atm, L);
+    this.sky.drawStars(bctx, atm, L);
+    this.sky.drawBodies(bctx, atm, L);
+    this.sky.drawClouds(bctx, atm, L, 0);
+    this.sky.drawBirds(bctx, atm, L);
     if (atm.flash > 0.01) {
-      ctx.fillStyle = `rgba(240,244,255,${0.75 * atm.flash})`;
-      ctx.fillRect(0, 0, w, L.horizonY + h * 0.1);
+      bctx.fillStyle = `rgba(240,244,255,${(this.reduced ? 0.18 : 0.75) * atm.flash})`;
+      bctx.fillRect(0, 0, w, L.horizonY + h * 0.1);
     }
 
+    this.mark('sky');
     // ---- distant ridges ----
     this.parallax.update(atm, this.forceTint);
     this.forceTint = false;
     const haze = P.haze;
     const mist = 0.18 + (atm._fog ?? 0) * 0.45 + (atm.weather === 'snow' ? 0.08 * atm.weatherAmt : 0);
     for (let i = 0; i < 5; i++) {
-      const { base } = this.parallax.drawLayer(ctx, i, L);
+      const { base } = this.parallax.drawLayer(bctx, i, L);
       // valley mist band at the foot of the layer
       const by = base - h * 0.1;
       const bh = h * 0.12;
-      const g = ctx.createLinearGradient(0, by - bh, 0, by + bh);
+      const g = bctx.createLinearGradient(0, by - bh, 0, by + bh);
       g.addColorStop(0, rgba(haze, 0));
       g.addColorStop(0.55, rgba(haze, mist * (1 - i * 0.12)));
       g.addColorStop(1, rgba(haze, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(0, by - bh, w, bh * 2);
-      if (i < 4) this.sky.drawClouds(ctx, atm, L, i + 1);
+      bctx.fillStyle = g;
+      bctx.fillRect(0, by - bh, w, bh * 2);
+      if (i < 4) this.sky.drawClouds(bctx, atm, L, i + 1);
+      if (i === 3) this.drawBeacon(bctx, atm, L, P, cam);
     }
+    this.mark('ridges');
     // valley haze rising from below the forest line (depth when the slope is out of view)
     {
       const y0 = h * 0.74 + L.vshift * 0.3;
-      const g = ctx.createLinearGradient(0, y0, 0, h);
+      const g = bctx.createLinearGradient(0, y0, 0, h);
       g.addColorStop(0, rgba(haze, 0));
       g.addColorStop(1, rgba(haze, 0.42 + (atm._fog ?? 0) * 0.3));
-      ctx.fillStyle = g;
-      ctx.fillRect(0, y0, w, h - y0);
+      bctx.fillStyle = g;
+      bctx.fillRect(0, y0, w, h - y0);
     }
+    // blit the background buffer once, upscaled
+    ctx.drawImage(this.bg, 0, 0, this.bg.width, this.bg.height, 0, 0, w, h);
 
+    this.mark('haze');
     // ---- slope ----
     this.terrain.sample(course, cam, L);
     const x0 = cam.worldX(0) - DECOR_MARGIN;
@@ -218,62 +361,113 @@ export class Renderer {
     // Everything standing IN the snow is drawn before the snow body so the
     // slope itself hides its base (no floating huts on steep sections).
     cam.apply(ctx, dpr);
-    for (const d of decor) if ((d.depth || 0) > 0) this.decor.draw(ctx, d, P, course);
-    for (const d of decor) if ((d.depth || 0) === 0) this.decor.draw(ctx, d, P, course);
+    // distance boards are drawn after the decor around them so nothing stands in front of them
+    const isBoard = (d) => d.type === 'banner' && (d.variant | 0) >= 50;
+    this.boardXs = this.boardXs || [];
+    this.boardXs.length = 0;
+    for (const d of decor) if ((d.depth || 0) > 0 && !isBoard(d)) this.decor.draw(ctx, d, P, course);
+    for (const d of decor) if ((d.depth || 0) === 0 && !isBoard(d)) this.decor.draw(ctx, d, P, course);
+    ctx.font = BOARD_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const d of decor) if (isBoard(d)) {
+      this.decor.draw(ctx, d, P, course);
+      this.boardXs.push(d.x);
+    }
+    ctx.textAlign = 'start';
     for (const f of feats) if (f.type === 'grind' && !isGroundIce(f, course)) this.features.draw(ctx, f, P, course, this.consumed);
+    this.mark('decorBack');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.terrain.drawBody(ctx, atm, cam, L);
+    this.mark('terrainBody');
     this.terrain.drawChasms(ctx, atm, cam, L, course);
     this.terrain.drawLip(ctx, atm, cam);
 
+    this.mark('chasmsLip');
+    // fog lies over the terrain but UNDER features, riders and pickups: it never veils a hazard
+    if (Qy.fog || atm.weather === 'fog') this.weather.drawFog(ctx, atm, L);
     cam.apply(ctx, dpr);
     if (!frame.cinematic) this.drawTrail(ctx, local, dt, P);
     for (const f of feats) if (f.type !== 'pickup' && (f.type !== 'grind' || isGroundIce(f, course))) this.features.draw(ctx, f, P, course, this.consumed);
     this.drawGlows(ctx);
     this.glows.n = 0;
 
+    this.mark('features');
     // ---- riders & effects ----
     this.emitContinuous(frame, dt, P, feats);
     this.particles.update(dt);
     for (const f of feats) if (f.type === 'pickup') this.features.drawPickup(ctx, f, P, this.consumed);
-    const others = frame.others || [];
-    for (const v of others) this.riders.draw(ctx, v, P, dt);
+    for (const v of others) if (v !== focus) this.riders.draw(ctx, v, P, dt);
     this.riders.draw(ctx, local, P, dt);
+    if (focus) {
+      // the followed rider is drawn with local-level prominence, last
+      const fv = Object.assign(this._focusView || (this._focusView = {}), focus);
+      fv.isLocal = true;
+      this.riders.draw(ctx, fv, P, dt);
+    }
+    this.drawWhooshes(ctx, local, others, dt);
+    this.drawAccents(ctx, dt);
     this.riders.drawDeparting(ctx, P, dt);
     this.drawFlyers(ctx, local, dt);
+    this.mark('riders');
     this.particles.draw(ctx, P.particleColors);
     this.drawGlows(ctx);
     this.glows.n = 0;
-    for (const d of decor) if ((d.depth || 0) < 0) this.decor.draw(ctx, d, P, course);
+    this.mark('particles');
+    for (const d of decor) if ((d.depth || 0) < 0 && !this.boardXs.some((bx) => Math.abs(bx - d.x) < 160)) this.decor.draw(ctx, d, P, course);
     this.drawGlows(ctx);
     this.glows.n = 0;
     this.riders.sweep();
 
+    this.mark('front');
     // ---- screen-space overlays ----
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.weather.drawFog(ctx, atm, L);
-    this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x), this.hazardsAhead(local, feats, cam));
+    L.weatherScale = Qy.weather;
+    this.mark('fog');
+    if (Qy.fg) this.effects.drawForeground(ctx, cam, P, L, course.startX, cam.sx(local.x), this.hazardsAhead(local, feats, cam));
+    this.mark('fgPines');
     this.weather.drawPrecip(ctx, atm, L);
-    const boostT = local.boostLevel ? 0.3 * local.boostLevel : 0;
+    this.mark('precip');
+    const boostT = local.boostLevel ? (this.reduced ? 0.12 : 0.3) * local.boostLevel : 0;
     this.boostFx += (boostT - this.boostFx) * (1 - Math.exp(-dt * 5));
     this.pulse *= Math.exp(-dt * 4);
-    this.effects.drawPost(ctx, atm, P, L, { rx: cam.sx(local.x), ryy: cam.sy(local.y) - 18 * cam.scale, boost: frame.cinematic ? 0 : this.boostFx, pulse: this.pulse, dir: Math.PI + Math.atan2(local.vy, local.vx), ry: cam.sy(local.y) - 20 * cam.scale });
+    this.effects.drawPost(ctx, atm, P, L, { reduced: !!this.reduced, vignette: Qy.vignette, rx: cam.sx(local.x), ryy: cam.sy(local.y) - 18 * cam.scale, boost: frame.cinematic ? 0 : this.boostFx, pulse: this.pulse, dir: Math.PI + Math.atan2(local.vy, local.vx), ry: cam.sy(local.y) - 20 * cam.scale });
 
-    // name tags of ghosts (not on cinematic screens)
+    this.mark('post');
+    // name tags of ghosts (not on cinematic screens), staggered when their x-ranges collide;
+    // then edge markers for the nearest rider off screen ahead and behind
     if (!frame.cinematic) {
-      const lp = cam.worldToScreen(local.x, local.y);
-      for (const v of others) {
-        const sp = cam.worldToScreen(v.x, v.y);
-        if (sp.x < -40 || sp.x > w + 40 || sp.y < -40 || sp.y > h + 40) continue;
-        const ty = sp.y - 54 * cam.scale;
-        const near = Math.hypot(sp.x - lp.x, ty - (lp.y - 30 * cam.scale));
-        const a = smoothstep(60, 110, near);
-        this.riders.drawTag(ctx, v, sp.x, ty, a, P);
-      }
+      ctx.font = TAG_FONT;
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '1px';
+      ctx.textBaseline = 'middle';
+      this.drawTags(ctx, local, others, focus, cam, P);
+      ctx.font = MARKER_FONT;
+      this.drawMarkers(ctx, local, others, focus, frame.markers, cam, P, dt, feats);
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
     }
+    this.mark('tags');
     ctx.restore();
     this._saved = false;
     this.lastDrawMs = performance.now() - t0;
+  }
+
+  /**
+   * Opt-in section profiler (renderer.profile = true): mean ms per section since the previous
+   * mark, accumulated in renderer.prof. Free when off.
+   */
+  mark(name) {
+    if (!this.profile) return;
+    // force the deferred canvas to rasterise what was recorded so far, so the time is attributed
+    this.p.drawingContext.getImageData(0, 0, 1, 1);
+    const now = performance.now();
+    if (name !== 'start') {
+      const pr = (this.prof = this.prof || {});
+      const e = (pr[this._markName] = pr[this._markName] || { ms: 0, n: 0 });
+      e.ms += now - this._markT;
+      e.n++;
+    }
+    this._markName = name;
+    this._markT = now;
   }
 
   /** Per-frame palette as numeric arrays (parsed once). */
@@ -324,22 +518,38 @@ export class Renderer {
     g.n++;
   }
 
-  /** Additive warm glows queued by decor/features (world transform applied). */
+  /** Additive warm glows queued by decor/features (world transform applied): cached tinted sprites. */
   drawGlows(ctx) {
     const g = this.glows;
     if (!g.n) return;
     const acc = hex(this.atmosphere.accent);
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < g.n; i++) {
-      const c = g.c[i] || acc;
-      const grad = ctx.createRadialGradient(g.x[i], g.y[i], 0, g.x[i], g.y[i], g.r[i]);
-      grad.addColorStop(0, rgba(c, 0.55 * g.a[i]));
-      grad.addColorStop(0.35, rgba(c, 0.18 * g.a[i]));
-      grad.addColorStop(1, rgba(c, 0));
-      ctx.fillStyle = grad;
-      ctx.fillRect(g.x[i] - g.r[i], g.y[i] - g.r[i], g.r[i] * 2, g.r[i] * 2);
+      const spr = this.glowSprite(g.c[i] || acc);
+      ctx.globalAlpha = Math.min(1, g.a[i]);
+      ctx.drawImage(spr, g.x[i] - g.r[i], g.y[i] - g.r[i], g.r[i] * 2, g.r[i] * 2);
     }
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /** Radial glow sprite for a colour (quantised; small LRU-ish cache). */
+  glowSprite(c) {
+    const key = ((c[0] >> 3) << 10) | ((c[1] >> 3) << 5) | (c[2] >> 3);
+    const cache = (this.glowCache = this.glowCache || new Map());
+    let spr = cache.get(key);
+    if (spr) return spr;
+    if (cache.size > 48) cache.clear();
+    spr = makeCanvas(64, 64);
+    const x = spr.getContext('2d');
+    const grad = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, rgba(c, 0.55));
+    grad.addColorStop(0.35, rgba(c, 0.18));
+    grad.addColorStop(1, rgba(c, 0));
+    x.fillStyle = grad;
+    x.fillRect(0, 0, 64, 64);
+    cache.set(key, spr);
+    return spr;
   }
 
   handleEvents(events, local, P) {
@@ -356,7 +566,9 @@ export class Renderer {
           const sketchy = !!d.sketchy || d.clean === false;
           this.landingFx(local, k, sketchy);
           this.riders.landed(local.id, k, sketchy);
-          if (k > 0.55) cam.addShake(1.2 + 3.5 * (k - 0.55) + (sketchy ? 1 : 0));
+          // weight: a tiny downward settle of the frame (≤ 6 px), no shake on a normal landing
+          cam.dip(6 * k);
+          if (sketchy) cam.addShake(1 + 1.5 * k);
           break;
         }
         case SimEvent.RESCUE_START: {
@@ -365,9 +577,11 @@ export class Renderer {
           this.particles.spawn(PK.RING, local.x, local.y - 10, 0, 0, 0.6, 46, 4, 0, 0);
           const f = this.featureById(d.featureId, local.x) || this.chasmNear(local.x);
           cam.rescueSpan = f ? this.spanOf(f) : null;
+          if (f) this.pushAccent(f.x0, Number.isFinite(f.y0) ? f.y0 : course.heightAt(f.x0 - 1), 46);
           break;
         }
         case SimEvent.CRASH:
+          this.accentFeature(d.cause, Number.isFinite(d.x) ? d.x : local.x);
           if (d.cause === 'log' || d.cause === 'snowman' || d.cause === 'spikes') this.obstacleFx(d.cause, x, y, local, 0.6);
           this.burst(x, y, 40, 300, 0);
           this.burst(x, y, 14, 160, 1);
@@ -406,9 +620,9 @@ export class Renderer {
           break;
         case SimEvent.BOOST: {
           const lv = clamp(d.level || 1, 1, 3);
-          this.pulse = Math.max(this.pulse, 0.25 + 0.15 * lv);
+          this.pulse = Math.max(this.pulse, this.reduced ? 0.08 : 0.25 + 0.15 * lv);
           cam.kick(0.035 + 0.035 * lv);
-          this.effects.burstAt(lv, P.t);
+          if (!this.reduced) this.effects.burstAt(lv, P.t);
           this.riders.flare(local.id, lv);
           this.burst(local.x, local.y, 10 + 10 * lv, 160 + 60 * lv, 0);
           for (let i = 0; i < 12 + 12 * lv; i++) {
@@ -427,7 +641,7 @@ export class Renderer {
           }
           break;
         case SimEvent.JUMP:
-          this.burst(local.x, local.y, 8, 90, 0);
+          // the take-off puff comes from the riders' take-off hook (scaled by speed)
           break;
         case SimEvent.GRIND_START:
           for (let i = 0; i < 10; i++) ps.spawn(PK.SPARK, local.x, local.y, local.vx * 0.3 + ps.rand(-120, 80), ps.rand(-200, -40), ps.rand(0.2, 0.45), 1.4, 3, 900, 1);
@@ -436,9 +650,10 @@ export class Renderer {
           // confetti from the finish arch banner, mostly in the rider's colour
           const ax = course.finishX + 75;
           const ay = course.heightAt(ax) - 125;
-          for (let i = 0; i < 90; i++) {
+          const nConf = this.reduced ? 30 : 90;
+          for (let i = 0; i < nConf; i++) {
             const a = -Math.PI / 2 + ps.rand(-1.1, 1.1);
-            const sp = ps.rand(120, 420);
+            const sp = ps.rand(120, 420) * (this.reduced ? 0.55 : 1);
             ps.spawn(PK.CONFETTI, ax + ps.rand(-70, 70), ay + ps.rand(-6, 6), Math.cos(a) * sp + local.vx * 0.2, Math.sin(a) * sp, ps.rand(1.6, 2.8), ps.rand(4, 7), i % 3 === 0 ? 6 : 7 + (i % 6), 260, 1.6);
           }
           for (let i = 0; i < 18; i++) ps.spawn(PK.SPARKLE, ax + ps.rand(-80, 80), ay + ps.rand(-40, 20), ps.rand(-40, 40), ps.rand(-60, 0), ps.rand(0.5, 1.1), ps.rand(3, 6), 4, 0, 2);
@@ -480,6 +695,257 @@ export class Renderer {
     }
   }
 
+  /** Name tags above ghosts; colliding x-ranges are staggered upward by row. */
+  drawTags(ctx, local, others, focus, cam, P) {
+    const w = this.width;
+    const h = this.height;
+    const lp = cam.worldToScreen(local.x, local.y);
+    const rows = (this._tagRows = this._tagRows || []);
+    rows.length = 0;
+    const list = (this._tagList = this._tagList || []);
+    list.length = 0;
+    for (const v of others) {
+      if (v === focus) continue;
+      const sp = cam.worldToScreen(v.x, v.y);
+      if (sp.x < -40 || sp.x > w + 40 || sp.y < -40 || sp.y > h + 40) continue;
+      list.push([sp.x, sp.y - 54 * cam.scale, v, Math.hypot(sp.x - lp.x, sp.y - 54 * cam.scale - (lp.y - 30 * cam.scale))]);
+    }
+    list.sort((a, b) => a[0] - b[0]);
+    const half = 34; // ≈ half a tag width
+    for (const [x, y, v, near] of list) {
+      let row = 0;
+      for (const [rx, ry, rr] of rows) if (Math.abs(rx - x) < half * 2 + 4 && Math.abs(ry - y) < 20 && rr >= row) row = rr + 1;
+      rows.push([x, y, row]);
+      this.riders.drawTag(ctx, v, x, y - row * 18, smoothstep(60, 110, near), P);
+    }
+  }
+
+  /**
+   * Edge markers for the nearest rider off screen ahead (right) and behind (left): a chevron in
+   * the rider's colour with the name and, if the frame supplies it, the time gap. Fades in/out,
+   * at most two, kept inside the safe band and dimmed where a hazard is near that edge.
+   */
+  drawMarkers(ctx, local, others, focus, markers, cam, P, dt, feats) {
+    const w = this.width;
+    const h = this.height;
+    let ahead = null;
+    let behind = null;
+    let aX = Infinity;
+    let bX = -Infinity;
+    for (const v of others) {
+      if (v === focus) continue;
+      const sx = cam.sx(v.x);
+      if (sx > w + 10 && sx < aX) {
+        aX = sx;
+        ahead = v;
+      } else if (sx < -10 && sx > bX) {
+        bX = sx;
+        behind = v;
+      }
+    }
+    const st = (this._markers = this._markers || new Map());
+    for (const [id, m] of st) m.want = 0;
+    for (const [v, side] of [
+      [ahead, 1],
+      [behind, -1],
+    ]) {
+      if (!v) continue;
+      let m = st.get(v.id);
+      if (!m) st.set(v.id, (m = { a: 0, want: 0 }));
+      m.want = 1;
+      m.side = side;
+      m.v = v;
+      const top = side < 0 ? Math.max(h * 0.3, 130) : h * 0.28;
+      const bot = side < 0 ? Math.min(h * 0.72, h - 140) : h * 0.72;
+      m.y = clamp(cam.sy(v.y) - 20 * cam.scale, top, bot);
+    }
+    const haz = this.hazards;
+    for (const [id, m] of st) {
+      m.a += (m.want - m.a) * (1 - Math.exp(-dt * 8));
+      if (m.a < 0.02 && !m.want) {
+        st.delete(id);
+        continue;
+      }
+      let gap = null;
+      if (markers) for (const mk of markers) if (mk.id === id && Number.isFinite(mk.gapS)) gap = mk.gapS;
+      // dim when a hazard sits near this edge
+      let dim = 1;
+      if (haz && m.side > 0) for (let k = 0; k < haz.n; k++) if (haz.r[k] > w - 140) dim = 0.45;
+      this.riders.drawMarker(ctx, m.v, m.side, m.side > 0 ? w - 10 : 10, m.y, m.a * dim, gap, P);
+    }
+  }
+
+  /** Overtakes near the local rider: a brief streak from the passer to the passed. */
+  drawWhooshes(ctx, local, others, dt) {
+    const sg = (this._passSign = this._passSign || new Map());
+    const list = (this._whoosh = this._whoosh || []);
+    for (const v of others) {
+      const dx = v.x - local.x;
+      if (Math.abs(dx) > 500 || !Number.isFinite(dx)) {
+        sg.delete(v.id);
+        continue;
+      }
+      const sign = dx >= 0 ? 1 : -1;
+      const prev = sg.get(v.id);
+      if (prev && prev !== sign && list.length < 4) list.push({ x0: sign > 0 ? local.x : v.x, y0: (sign > 0 ? local.y : v.y) - 20, x1: sign > 0 ? v.x : local.x, y1: (sign > 0 ? v.y : local.y) - 20, color: hex(sign > 0 ? v.color : local.color), age: 0 });
+      sg.set(v.id, sign);
+    }
+    ctx.lineCap = 'round';
+    for (let i = list.length - 1; i >= 0; i--) {
+      const wh = list[i];
+      wh.age += dt;
+      if (wh.age > 0.45) {
+        list.splice(i, 1);
+        continue;
+      }
+      const u = wh.age / 0.45;
+      const g = ctx.createLinearGradient(wh.x0 - 120, wh.y0, wh.x1, wh.y1);
+      g.addColorStop(0, rgba(wh.color, 0));
+      g.addColorStop(0.65, rgba(mix(wh.color, [255, 255, 255], 0.35), 0.85 * (1 - u)));
+      g.addColorStop(1, rgba([255, 255, 255], 0));
+      ctx.strokeStyle = g;
+      // three strands of a curved whoosh from behind the passer to the passed rider
+      for (let k = -1; k <= 1; k++) {
+        ctx.lineWidth = (k === 0 ? 4 : 2) * (1 - u) + 0.8;
+        ctx.beginPath();
+        ctx.moveTo(wh.x0 - 120, wh.y0 + 6 + k * 7);
+        ctx.quadraticCurveTo((wh.x0 + wh.x1) / 2, Math.min(wh.y0, wh.y1) - 22 + k * 6, wh.x1, wh.y1 + k * 4);
+        ctx.stroke();
+      }
+    }
+  }
+
+  /** Highlight ring on the feature that ended a run (crash cause / pit). */
+  accentFeature(cause, x) {
+    const type = cause === 'chasm' ? 'chasm' : cause;
+    if (!type || type === 'landing') return;
+    let best = null;
+    let bd = 220;
+    for (const f of this.course.featuresIn(x - 220, x + 220)) {
+      if (f.type !== type) continue;
+      const fx = f.type === 'chasm' ? f.x0 : f.x;
+      if (Math.abs(fx - x) < bd) {
+        bd = Math.abs(fx - x);
+        best = f;
+      }
+    }
+    if (!best) return;
+    if (best.type === 'chasm') this.pushAccent(best.x0, Number.isFinite(best.y0) ? best.y0 : this.course.heightAt(best.x0 - 1), 46);
+    else {
+      const r = Math.max(24, (best.w || (best.size || 20) * 2) * 0.6, (best.h || 0) * 0.7);
+      this.pushAccent(best.x, this.course.heightAt(best.x) - Math.min(r * 0.5, (best.h || best.size || 20) * 0.5), r);
+    }
+  }
+
+  pushAccent(x, y, r) {
+    const a = (this._accents = this._accents || []);
+    if (a.length > 3) a.shift();
+    a.push({ x, y, r, age: 0 });
+  }
+
+  drawAccents(ctx, dt) {
+    const a = this._accents;
+    if (!a || !a.length) return;
+    ctx.lineWidth = 2.5;
+    for (let i = a.length - 1; i >= 0; i--) {
+      const ac = a[i];
+      ac.age += dt;
+      if (ac.age > 0.9) {
+        a.splice(i, 1);
+        continue;
+      }
+      for (const off of [0, 0.25]) {
+        const u = clamp((ac.age - off) / 0.6, 0, 1);
+        if (u <= 0 || u >= 1) continue;
+        ctx.strokeStyle = `rgba(255,255,255,${0.85 * (1 - u)})`;
+        ctx.beginPath();
+        ctx.arc(ac.x, ac.y, ac.r * (0.8 + 0.9 * u), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  /**
+   * Finish beacon: a tall lattice tower with a waving banner and a pulsing light on a far hill
+   * beyond the finish, placed by distance to finishX so it drifts in from the right and grows as
+   * the finish approaches. Drawn into the background buffer between ridge layers 3 and 4.
+   */
+  drawBeacon(ctx, atm, L, P, cam) {
+    const c = this.course;
+    const d = c.finishX - cam.x;
+    if (d < -1500 || d > c.length * 0.65) return;
+    const fade = clamp((c.length * 0.65 - d) / 2500, 0, 1) * clamp((d + 1500) / 1500, 0, 1);
+    if (fade <= 0.01) return;
+    const u = 1 - Math.exp(-Math.max(0, d) / 16000);
+    const x = cam.anchorX + 80 + L.w * 0.5 * u;
+    const hT = L.h * (0.15 + 0.2 * (1 - u));
+    const base = L.h * 0.72 + L.vshift * 0.25;
+    const col = mix(hex(atm.ridges[3]), P.sil, 0.35);
+    const t = L.t;
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = rgba(col);
+    ctx.strokeStyle = rgba(col);
+    const bw = hT * 0.16;
+    const tw = hT * 0.05;
+    const top = base - hT;
+    // legs
+    ctx.beginPath();
+    ctx.moveTo(x - bw, base);
+    ctx.lineTo(x - tw, top);
+    ctx.lineTo(x - tw + 2, top);
+    ctx.lineTo(x - bw + 3, base);
+    ctx.moveTo(x + bw, base);
+    ctx.lineTo(x + tw, top);
+    ctx.lineTo(x + tw - 2, top);
+    ctx.lineTo(x + bw - 3, base);
+    ctx.fill();
+    // cross braces
+    ctx.lineWidth = Math.max(1, hT * 0.012);
+    ctx.beginPath();
+    const n = 5;
+    for (let k = 0; k < n; k++) {
+      const y0 = base - (hT * k) / n;
+      const y1 = base - (hT * (k + 1)) / n;
+      const w0 = bw - ((bw - tw) * k) / n;
+      const w1 = bw - ((bw - tw) * (k + 1)) / n;
+      ctx.moveTo(x - w0, y0);
+      ctx.lineTo(x + w1, y1);
+      ctx.moveTo(x + w0, y0);
+      ctx.lineTo(x - w1, y1);
+    }
+    ctx.stroke();
+    // platform + cabin + mast
+    ctx.fillRect(x - tw * 2.2, top - hT * 0.02, tw * 4.4, hT * 0.025);
+    ctx.fillRect(x - tw * 1.3, top - hT * 0.09, tw * 2.6, hT * 0.07);
+    ctx.fillRect(x - 1, top - hT * 0.22, 2, hT * 0.13);
+    // banner on the mast (festive, waving)
+    ctx.fillStyle = rgba(mix(P.festive[0], hex(atm.skyBottom), 0.15));
+    ctx.beginPath();
+    const by = top - hT * 0.22;
+    const bl = hT * 0.16;
+    const bh = hT * 0.06;
+    ctx.moveTo(x + 1, by);
+    for (let k = 1; k <= 6; k++) ctx.lineTo(x + 1 + (bl * k) / 6, by + Math.sin(t * 4 + k * 0.9) * bh * 0.18 * (k / 6));
+    for (let k = 6; k >= 0; k--) ctx.lineTo(x + 1 + (bl * k) / 6, by + bh + Math.sin(t * 4 + k * 0.9) * bh * 0.18 * (k / 6));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    // beacon light: pulsing warm glow (brighter at night)
+    const pulse = 0.55 + 0.45 * Math.sin(t * 5.2);
+    const lr = hT * (0.1 + 0.08 * P.night);
+    const spr = this.glowSprite(P.accent);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = fade * (0.35 + 0.65 * P.night) * pulse;
+    ctx.drawImage(spr, x - lr, top - hT * 0.06 - lr, lr * 2, lr * 2);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(255,230,170,${fade * (0.6 + 0.4 * pulse)})`;
+    ctx.beginPath();
+    ctx.arc(x, top - hT * 0.06, Math.max(1.5, hT * 0.018), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   /** Lips of a chasm feature for the camera. */
   spanOf(f) {
     const c = this.course;
@@ -514,6 +980,10 @@ export class Renderer {
         const u = i / (6 + 14 * k);
         ps.spawn(PK.PUFF, tx, ty - 2, -v.vx * (0.05 + 0.2 * u) + side * ps.rand(10, 60) * m, -(120 + 220 * k) * (0.6 + 0.6 * u) * ps.rand(0.8, 1.1), ps.rand(0.4, 0.75), ps.rand(1.4, 3.2), 0, 700, 2.4);
       }
+    }
+    if (k > 0.6) {
+      // heavy impact: a few big slow clouds hanging over the touchdown
+      for (let i = 0; i < Math.round(16 * (k - 0.5) * m); i++) ps.spawn(PK.PUFF, v.x + ps.rand(-22, 22), v.y - ps.rand(0, 8), v.vx * ps.rand(0.1, 0.4) + ps.rand(-50, 50), -ps.rand(40, 120), ps.rand(0.7, 1.2), ps.rand(5, 9), i % 3 ? 0 : 1, 140, 2);
     }
     this.trailBoost = 1;
   }

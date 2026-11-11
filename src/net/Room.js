@@ -26,6 +26,14 @@
  * (min-RTT sample of the last 8, refreshed every 5 s and after every host change).
  *
  * Event order: 'players' → 'settings' → 'start' → 'results' → 'phase' within one update.
+ * Additive event 'closing' ({raceId, closesAtLocalMs, graceMs}) fires once per race when the first
+ * finisher becomes known (see raceClosesAtLocalMs). 'closed' reasons: 'left' | 'pagehide' | 'removed'.
+ *
+ * Colours are host-assigned and unique among connected players: a taken request gets the lowest
+ * free index starting from the requested one (wrapping). Names are de-duplicated with a suffix.
+ * 'start' is emitted exactly once per race to every participant, however it learns of the race
+ * (live start, rematch from results, reconnect / hello during the countdown — a roster player who
+ * (re)appears during the countdown is added to the race).
  */
 import { Phase, MAX_PLAYERS, COUNTDOWN_MS, DEFAULT_SETTINGS, PLAYER_COLORS, COURSE_LENGTHS, WEATHERS, START_TIMES } from '../contracts.js';
 import { Emitter } from './emitter.js';
@@ -41,11 +49,13 @@ export const NET_TIMING = Object.freeze({
   removeMs: 20000, // disconnected this long in lobby/results → removed from the roster
   joinTimeoutMs: 4000, // no host answer → 'not-found'
   helloRetryMs: 800,
-  connectTimeoutMs: 6000, // joiner → 'offline'
+  connectTimeoutMs: 10000, // joiner → 'offline' (hivemq has been seen taking 6 s to accept a connection)
   createRaceMs: 3000, // create: wait this long for the best-ranked broker
   syncEveryMs: 5000,
   metaEveryMs: 10000,
-  graceMs: 30000, // after the first finisher
+  graceMsByLength: Object.freeze({ sprint: 25000, classic: 35000, marathon: 45000 }), // after the first finisher; the host's value travels in the start snapshot
+  graceMs: 35000, // fallback when a length is missing from graceMsByLength
+  kickBanMs: 60000, // a removed id cannot rejoin for this long
   capMs: Object.freeze({ sprint: 4 * 60000, classic: 6 * 60000, marathon: 9 * 60000 }), // from GO
   minFinishMs: 10000, // finish times below this are rejected
 });
@@ -95,6 +105,10 @@ export function sanitizeSettings(s, base = DEFAULT_SETTINGS) {
   if ('bots' in s) {
     if (!Number.isInteger(s.bots) || s.bots < 0 || s.bots > 6) return null;
     out.bots = s.bots;
+  }
+  if ('catchUp' in s) {
+    if (typeof s.catchUp !== 'boolean') return null;
+    out.catchUp = s.catchUp;
   }
   return out;
 }
@@ -193,7 +207,7 @@ export class Room {
     this._em = new Emitter();
     this._t = transport;
     this._clock = opts.clock || systemClock;
-    this._tm = { ...NET_TIMING, ...(opts.timing || {}), capMs: { ...NET_TIMING.capMs, ...(opts.timing?.capMs || {}) } };
+    this._tm = { ...NET_TIMING, ...(opts.timing || {}), capMs: { ...NET_TIMING.capMs, ...(opts.timing?.capMs || {}) }, graceMsByLength: { ...NET_TIMING.graceMsByLength, ...(opts.timing?.graceMsByLength || {}) } };
     this.code = code;
     this.selfId = opts.selfId && ID_RE.test(opts.selfId) ? opts.selfId : randomId();
     this.brokerName = transport.name || '';
@@ -237,6 +251,7 @@ export class Room {
     this._peerRtt = new Map();
     this._emitted = { players: '', settings: '', phase: '' };
     this._lastMetaKey = '';
+    this._banned = new Map(); // id → local ms until which hello/finish/state from it are ignored
     this._closed = false;
     this._joinedAt = this._clock.now();
     this._wasOffline = false;
@@ -258,6 +273,43 @@ export class Room {
   /** True when the local player is a participant of the current race (additive). */
   get isRacing() {
     return !!this.race && this.race.ids.includes(this.selfId);
+  }
+
+  /** Colour indices used by OTHER connected players (additive; for marking swatches). */
+  get takenColors() {
+    return this._roster.filter((p) => p.id !== this.selfId && p.connected).map((p) => p.colorIndex);
+  }
+
+  /**
+   * Local performance.now()-based time at which the running race closes (first finish + grace),
+   * or null before the first finisher / outside a race (additive). A 'closing' event fires when it becomes known.
+   */
+  get raceClosesAtLocalMs() {
+    const r = this.race;
+    if (!r || !Number.isFinite(r.firstFinishLocal) || (this.phase !== Phase.COUNTDOWN && this.phase !== Phase.RACING)) return null;
+    return r.firstFinishLocal + r.graceMs;
+  }
+
+  /**
+   * Host only (additive): kick a player. Its Room emits 'closed' {reason:'removed'}; it is dropped
+   * from the roster and from a running race's expected finishers, and its id is refused for kickBanMs.
+   */
+  removePlayer(id) {
+    if (!this.isHost || this._closed || id === this.selfId || !this._inRoster(id)) return;
+    this._send('deny', { to: id, r: 'removed' }, true);
+    this._banned.set(id, this._clock.now() + this._tm.kickBanMs);
+    this._roster = this._roster.filter((p) => p.id !== id);
+    if (this.race) this.race.ids = this.race.ids.filter((x) => x !== id);
+    this._commit();
+    this._checkEnd();
+  }
+
+  _isBanned(id) {
+    const until = this._banned.get(id);
+    if (until === undefined) return false;
+    if (this._clock.now() < until) return true;
+    this._banned.delete(id);
+    return false;
   }
 
   /** Host clock estimate in local time (additive). */
@@ -367,13 +419,13 @@ export class Room {
     const names = {};
     for (const p of this._roster) names[p.id] = { name: p.name, colorIndex: p.colorIndex };
     this._raceCounter += 1;
-    this._newRace({ raceId: this._raceCounter, seed: randomUint32(), settings: { ...this.settings }, goAtLocalMs: now + COUNTDOWN_MS, ids, names });
+    this._newRace({ raceId: this._raceCounter, seed: randomUint32(), settings: { ...this.settings }, goAtLocalMs: now + COUNTDOWN_MS, ids, names, graceMs: this._tm.graceMsByLength[this.settings.length] ?? this._tm.graceMs });
     this.results = null;
     this._myFinish = null;
     this._pendingFins.clear();
     this._localBotFins.clear();
     this.phase = Phase.COUNTDOWN;
-    this._commit({ start: true });
+    this._commit();
     this._armHostRace();
   }
 
@@ -592,7 +644,8 @@ export class Room {
       s: this.settings,
       p: this._roster.map((p) => [p.id, p.name, p.colorIndex, p.connected ? 1 : 0, p.ready ? 1 : 0]),
       rc: this._raceCounter,
-      race: r ? { id: r.raceId, seed: r.seed, s: r.settings, go: r.goAtLocalMs, ids: r.ids, fin: [...r.finished.values()] } : null,
+      race: r ? { id: r.raceId, seed: r.seed, s: r.settings, go: r.goAtLocalMs, ids: r.ids, fin: [...r.finished.values()], gr: r.graceMs, ff: Number.isFinite(r.firstFinishLocal) ? r.firstFinishLocal : null } : null,
+      bn: [...this._banned].filter(([, until]) => until > this._clock.now()).slice(0, 32).map(([id, until]) => [id, Math.round(until - this._clock.now())]),
       res: this.phase === Phase.RESULTS ? this.results : null,
       now: this._clock.now(),
     };
@@ -619,7 +672,7 @@ export class Room {
     this._publishMeta();
   }
 
-  _emitChanges({ start = false, results = false } = {}) {
+  _emitChanges({ results = false } = {}) {
     const players = this._roster.map((p) => ({ id: p.id, name: p.name, colorIndex: p.colorIndex, isHost: p.id === this.hostId, connected: p.connected, ready: p.ready }));
     const pk = JSON.stringify(players);
     if (pk !== this._emitted.players) {
@@ -632,8 +685,9 @@ export class Room {
       this._emitted.settings = sk;
       this._em.emit('settings', { ...this.settings });
     }
-    if (start && this.race && this.isRacing) {
-      const r = this.race;
+    const r = this.race;
+    if (r && !r._startEmitted && this.isRacing && (this.phase === Phase.COUNTDOWN || this.phase === Phase.RACING)) {
+      r._startEmitted = true;
       this._em.emit('start', { seed: r.seed, settings: { ...r.settings }, goAtLocalMs: r.goAtLocalMs, raceId: r.raceId });
     }
     if (results && this.results) this._em.emit('results', this.results);
@@ -674,11 +728,19 @@ export class Room {
       if (m.to === this.selfId && f === (this._joinWait?.meta?.h || f) && this._joinWait) {
         const jw = this._joinWait;
         this._joinWait = null;
-        jw.reject(new Error(m.r === 'full' ? 'full' : 'not-found'));
+        jw.reject(new Error(m.r === 'full' ? 'full' : m.r === 'removed' ? 'removed' : 'not-found'));
+      } else if (m.to === this.selfId && m.r === 'removed' && f === this.hostId && !this._joinWait) {
+        this._shutdown();
+        this._em.emit('closed', { reason: 'removed' });
       }
       return;
     }
     if (this._joinWait) return; // not in the room yet
+    if (this._isBanned(f)) {
+      // kicked recently: refuse re-joins explicitly, ignore everything else
+      if (m.t === 'hello' && this.isHost) this._send('deny', { to: f, r: 'removed' }, true);
+      return;
+    }
     const known = this._inRoster(f);
     if (HOST_ONLY.has(m.t) && f !== this.hostId) return;
     if (m.t === 'hello') {
@@ -735,7 +797,7 @@ export class Room {
   _onState(topic, net) {
     if (this._closed || this._joinWait) return;
     const id = topic.slice(topic.lastIndexOf('/') + 1);
-    if (id === this.selfId || !ID_RE.test(id) || !this._inRoster(id) || !validNet(net)) return;
+    if (id === this.selfId || !ID_RE.test(id) || !this._inRoster(id) || !validNet(net) || this._isBanned(id)) return;
     const now = this._clock.now();
     if (!this._stateGate.allow(id, now)) return;
     this._touch(id);
@@ -782,7 +844,8 @@ export class Room {
           if (c && c.timeMs >= 0) fins.push(c);
         }
       }
-      race = { raceId: r.id, seed: r.seed >>> 0, settings: rs, goHost: r.go, ids: r.ids.slice(), fin: fins };
+      const graceMs = Number.isInteger(r.gr) && r.gr >= 5000 && r.gr <= 300000 ? r.gr : NET_TIMING.graceMs;
+      race = { raceId: r.id, seed: r.seed >>> 0, settings: rs, goHost: r.go, ids: r.ids.slice(), fin: fins, graceMs, ffHost: fin(r.ff) ? r.ff : null };
     }
     const results = m.res ? sanitizeResults(m.res) : null;
 
@@ -819,19 +882,24 @@ export class Room {
     this._touch(f);
     this._hostGone = false;
     if (fin(m.now)) this._sync.setRough(m.now - (this._clock.now() - 80)); // assume ~80 ms one-way until ping/pong
+    if (Array.isArray(m.bn) && m.bn.length <= 32) {
+      for (const b of m.bn) if (Array.isArray(b) && typeof b[0] === 'string' && ID_RE.test(b[0]) && fin(b[1]) && b[1] > 0) this._banned.set(b[0], this._clock.now() + Math.min(b[1], this._tm.kickBanMs));
+    }
+    const mine = roster.find((p) => p.id === this.selfId);
+    if (mine) this._profile.colorIndex = mine.colorIndex; // host may have assigned a free colour
 
-    let start = false;
     if (race) {
       if (!this.race || this.race.raceId !== race.raceId) {
         const names = {};
         for (const p of roster) names[p.id] = { name: p.name, colorIndex: p.colorIndex };
         this._newRace({ ...race, goAtLocalMs: this._sync.toLocal(race.goHost), names });
-        start = m.ph === Phase.COUNTDOWN || m.ph === Phase.RACING;
+        if (m.ph !== Phase.RESULTS) this.results = null;
         this._myFinish = null;
         this._pendingFins.clear();
         this._localBotFins.clear();
       } else {
         this.race.ids = race.ids;
+        this.race.graceMs = race.graceMs;
       }
     } else if (m.ph === Phase.LOBBY) {
       this._clearRaceTimers();
@@ -849,6 +917,8 @@ export class Room {
     this.phase = ph;
     if (this.race) {
       this._armLocalGo();
+      // Keep our own first-finish time across host changes; adopt the host's if we have none.
+      if (race && race.ffHost !== null && !Number.isFinite(this.race.firstFinishLocal)) this._setFirstFinish(this._sync.toLocal(race.ffHost));
       if (race) for (const rep of race.fin) if (!this.race.finished.has(rep.id)) this._recordFinish(rep);
     }
 
@@ -856,7 +926,7 @@ export class Room {
     const inRoster = this._inRoster(this.selfId);
     if (joining && !inRoster) return; // not acknowledged yet — wait (hello retries)
     if (joining) this._joined();
-    this._emitChanges({ start, results: resultsNew });
+    this._emitChanges({ results: resultsNew });
     if (!joining && !inRoster && this.status === 'online') {
       this._send('hello', { n: this._profile.name, c: this._profile.colorIndex }, true);
     }
@@ -869,7 +939,7 @@ export class Room {
 
   _newRace(r) {
     this._clearRaceTimers();
-    this.race = { raceId: r.raceId, seed: r.seed, settings: r.settings, goAtLocalMs: r.goAtLocalMs, ids: r.ids, names: r.names, finished: new Map(), firstFinishLocal: NaN };
+    this.race = { raceId: r.raceId, seed: r.seed, settings: r.settings, goAtLocalMs: r.goAtLocalMs, ids: r.ids, names: r.names, finished: new Map(), firstFinishLocal: NaN, graceMs: r.graceMs ?? this._tm.graceMs };
     this._lastX.clear();
     this._armLocalGo();
   }
@@ -909,11 +979,34 @@ export class Room {
     return name;
   }
 
+  /** Lowest free colour starting from the requested one (wrapping); "free" = not used by another connected player. */
+  _assignColor(id, requested) {
+    const taken = new Set(this._roster.filter((p) => p.id !== id && p.connected).map((p) => p.colorIndex));
+    const n = PLAYER_COLORS.length;
+    for (let k = 0; k < n; k++) {
+      const c = (requested + k) % n;
+      if (!taken.has(c)) return c;
+    }
+    return requested;
+  }
+
   _applyProfile(id, n, c) {
     const p = this._roster.find((x) => x.id === id);
     if (!p) return;
     p.name = this._dedupeName(sanitizeName(n), id);
-    p.colorIndex = sanitizeColor(c);
+    p.colorIndex = this._assignColor(id, sanitizeColor(c));
+    if (id === this.selfId) this._profile.colorIndex = p.colorIndex;
+  }
+
+  /** During the countdown a (re)appearing roster player still makes it into the race. */
+  _includeInCountdown(id) {
+    const r = this.race;
+    if (!r || this.phase !== Phase.COUNTDOWN || r.ids.includes(id) || r.ids.length >= MAX_PLAYERS) return;
+    const p = this._roster.find((x) => x.id === id);
+    if (!p) return;
+    r.ids.push(id);
+    r.names[id] = { name: p.name, colorIndex: p.colorIndex };
+    p.ready = true;
   }
 
   _hostHello(f, m) {
@@ -921,6 +1014,7 @@ export class Room {
     if (existing) {
       existing.connected = true;
       this._applyProfile(f, m.n, m.c);
+      this._includeInCountdown(f);
       this._commit(); // always resend: the sender is asking for the snapshot
       this._checkEnd();
       return;
@@ -932,8 +1026,9 @@ export class Room {
       this._send('deny', { to: f, r: 'full' }, true);
       return;
     }
-    this._roster.push({ id: f, name: this._dedupeName(sanitizeName(m.n), f), colorIndex: sanitizeColor(m.c), connected: true, ready: this.phase === Phase.LOBBY });
+    this._roster.push({ id: f, name: this._dedupeName(sanitizeName(m.n), f), colorIndex: this._assignColor(f, sanitizeColor(m.c)), connected: true, ready: this.phase === Phase.LOBBY });
     if (this.race) this.race.names[f] = { name: this._roster.at(-1).name, colorIndex: this._roster.at(-1).colorIndex };
+    this._includeInCountdown(f);
     this._touch(f);
     this._commit();
   }
@@ -942,6 +1037,8 @@ export class Room {
     const p = this._roster.find((x) => x.id === id);
     if (p && !p.connected) {
       p.connected = true;
+      p.colorIndex = this._assignColor(id, p.colorIndex); // someone may have taken it meanwhile
+      this._includeInCountdown(id);
       this._commit();
     }
   }
@@ -1065,7 +1162,7 @@ export class Room {
     const r = this.race;
     if (!r || r._graceArmed || !this.isHost) return;
     r._graceArmed = true;
-    const dt = Math.max(0, r.firstFinishLocal + this._tm.graceMs - this._clock.now());
+    const dt = Math.max(0, r.firstFinishLocal + r.graceMs - this._clock.now());
     this._raceTimers.push(this._clock.setTimeout(() => this._endRace('grace'), dt));
   }
 
@@ -1095,26 +1192,35 @@ export class Room {
       rep = { ...r, name: who.name, colorIndex: who.colorIndex, progress: 1 };
     }
     this._recordFinish(rep);
-    this._send('fok', { rid: race.raceId, r: rep }, true);
+    this._send('fok', { rid: race.raceId, r: rep, ff: race.firstFinishLocal }, true);
     if (!quiet) this._checkEnd();
   }
 
-  _recordFinish(rep) {
+  /** @param {number} [ffLocal] first-finish time in our timebase (from the host), default now */
+  _recordFinish(rep, ffLocal) {
     const race = this.race;
     if (race.finished.has(rep.id)) return;
     race.finished.set(rep.id, rep);
-    if (!Number.isFinite(race.firstFinishLocal)) {
-      race.firstFinishLocal = this._clock.now();
-      this._armGrace();
-    }
+    if (!Number.isFinite(race.firstFinishLocal)) this._setFirstFinish(Number.isFinite(ffLocal) ? Math.min(ffLocal, this._clock.now()) : this._clock.now());
     this._em.emit('finish', rep);
+  }
+
+  /** First finisher known → the race closes at firstFinish + grace; emit 'closing' once per race. */
+  _setFirstFinish(localMs) {
+    const race = this.race;
+    if (!race || Number.isFinite(race.firstFinishLocal) || !Number.isFinite(localMs)) return;
+    race.firstFinishLocal = localMs;
+    this._armGrace();
+    if (this.phase === Phase.COUNTDOWN || this.phase === Phase.RACING) {
+      this._em.emit('closing', { raceId: race.raceId, closesAtLocalMs: localMs + race.graceMs, graceMs: race.graceMs });
+    }
   }
 
   _onFok(m) {
     if (!this.race || m.rid !== this.race.raceId) return;
     const r = sanitizeReport(m.r);
     if (!r || r.timeMs < 0) return;
-    this._recordFinish(r);
+    this._recordFinish(r, fin(m.ff) ? this._sync.toLocal(m.ff) : undefined);
   }
 
   _checkEnd() {
@@ -1127,7 +1233,7 @@ export class Room {
     const botsDone = [...race.finished.keys()].filter((id) => BOT_RE.test(id)).length >= (race.settings.bots || 0);
     const anyFinished = race.finished.size > 0;
     // Everyone still connected is done. Wait for outstanding bots (bounded by the grace timer).
-    if (botsDone || !anyFinished || now - race.firstFinishLocal >= this._tm.graceMs) this._endRace('all');
+    if (botsDone || !anyFinished || now - race.firstFinishLocal >= race.graceMs) this._endRace('all');
   }
 
   _endRace(reason) {

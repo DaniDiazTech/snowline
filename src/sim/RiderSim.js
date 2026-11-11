@@ -24,11 +24,45 @@
  */
 import { RiderMode, SimEvent, FeatureType, GrindKind, PickupKind, TICK_DT, TICK_MS } from '../contracts.js';
 import { clamp, damp, smoothstep, wrapAngle, TAU } from '../math/utils.js';
-import { SIM, TRICKS, GRAVITY, JUMP_VY, DRAG_K, REF_SPEED, RAMP_POP, BODY_CENTER, RIDER_HEIGHT, terminalSpeed } from './simConfig.js';
+import { SIM, TRICKS, GRINDS, GRAVITY, JUMP_VY, DRAG_K, REF_SPEED, rampPop, BODY_CENTER, RIDER_HEIGHT, terminalSpeed } from './simConfig.js';
 
 const dt = TICK_DT;
-const GRIND_LABELS = { [GrindKind.BUNTING]: 'Bunting Grind', [GrindKind.ROOF]: 'Roof Grind', [GrindKind.ICE]: 'Ice Slide' };
+const CHAIN_LABEL = ['', '', ' ×2', ' ×3', ' ×4', ' ×5'];
 const FLIP_NAMES = ['', 'backflip', 'doubleBackflip', 'tripleBackflip'];
+const NO_EVENTS = Object.freeze([]);
+
+/**
+ * Sorted index over one category of features with their horizontal extents, for cheap,
+ * allocation-free range queries (the course-wide index must scan back by the longest feature).
+ */
+class SpanIndex {
+  constructor(list, extent) {
+    this.items = list.slice().sort((a, b) => extent(a)[0] - extent(b)[0]);
+    this.start = new Float64Array(this.items.length);
+    this.end = new Float64Array(this.items.length);
+    this.maxSpan = 0;
+    this.items.forEach((f, i) => {
+      const [a, b] = extent(f);
+      this.start[i] = a;
+      this.end[i] = b;
+      this.maxSpan = Math.max(this.maxSpan, b - a);
+    });
+  }
+  /** Items overlapping [x0, x1], written into `out`. */
+  query(x0, x1, out) {
+    out.length = 0;
+    const v = x0 - this.maxSpan;
+    let lo = 0;
+    let hi = this.start.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.start[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < this.start.length && this.start[i] <= x1; i++) if (this.end[i] >= x0) out.push(this.items[i]);
+    return out;
+  }
+}
 /** Solid obstacles: circles (rock, campfire: `size` = radius) and boxes (log, snowman, spikes: `w`, `h`). */
 const SOLID = {
   [FeatureType.ROCK]: { box: false, smash: 'rockSmash', label: 'Rock Smash' },
@@ -69,6 +103,9 @@ function freshPrivate() {
     wobbleT: 0, // s of sketchy-landing wobble left
     rescue: null, // active pit rescue lift
     rampLaunch: null, // pit ramp whose lip a press made on its run-up will launch from
+    lineChain: 0, // lines caught in the current chain (reset on plain snow)
+    assistTarget: 0, // RiderInput.assist of the last tick (0..1)
+    assistEff: 0, // eased assist actually applied
     spinChecked: false, // this air phase's "is there time to flip?" check was done
     spinBlocked: false, // ...and it said no: a held button keeps the board level instead
     landSquash: 0,
@@ -115,6 +152,17 @@ export class RiderSim {
     };
     Object.defineProperty(this.state, '_sim', { value: this, enumerable: false, writable: true, configurable: true });
     this._ramps = course.features.filter((f) => f.type === FeatureType.RAMP);
+    // Per-category indexes (pickups, solid obstacles, grind/ice lines) for cheap per-tick queries.
+    const ext = (f) => (course._extent ? course._extent(f) : [f.x0 ?? f.x - (f.w ? f.w / 2 : f.size || 0), f.x1 ?? f.x + (f.w ? f.w / 2 : f.size || 0)]);
+    this._pickIdx = new SpanIndex(course.features.filter((f) => f.type === FeatureType.PICKUP), ext);
+    this._solidIdx = new SpanIndex(course.features.filter((f) => SOLID[f.type]), ext);
+    this._lineIdx = new SpanIndex(course.features.filter((f) => f.type === FeatureType.GRIND), ext);
+    this._ev = []; // reused per-tick event buffer
+    this._qa = []; // reused feature-query buffers (one per call site, so nested queries never clash)
+    this._qb = [];
+    this._qc = [];
+    this._qd = [];
+    this._qe = [];
   }
 
   /** IDLE → GROUND at GO. */
@@ -128,7 +176,7 @@ export class RiderSim {
   }
 
   /** Copies the complete simulation state of another RiderSim on the same course (used by bots to plan). */
-  copyFrom(other) {
+  copyFrom(other, copyConsumed = true) {
     const a = this.state;
     const b = other.state;
     for (const k in b) {
@@ -137,11 +185,15 @@ export class RiderSim {
     }
     a.combo.points = b.combo.points;
     a.combo.mult = b.combo.mult;
-    a.combo.tricks = b.combo.tricks.slice();
+    a.combo.tricks.length = 0;
+    for (let i = 0; i < b.combo.tricks.length; i++) a.combo.tricks.push(b.combo.tricks[i]);
     Object.assign(a.stats, b.stats);
     Object.assign(this._p, other._p);
-    this.consumed.clear();
-    for (const id of other.consumed) this.consumed.add(id);
+    if (other._p.rescue) this._p.rescue = { ...other._p.rescue }; // the lift state is mutated per tick
+    if (copyConsumed) {
+      this.consumed.clear();
+      for (const id of other.consumed) this.consumed.add(id);
+    }
   }
 
   /**
@@ -150,13 +202,18 @@ export class RiderSim {
    * @returns {import('../contracts.js').SimEventRecord[]}
    */
   step(input) {
-    const ev = [];
+    const ev = this._ev;
+    ev.length = 0;
     const st = this.state;
     const p = this._p;
     if (st.mode === RiderMode.IDLE) return ev;
     st.tick++;
     const finished = st.finishTick >= 0;
     const held = !finished && !!(input && input.held);
+    const assist = input && input.assist > 0 ? Math.min(1, input.assist) : 0;
+    p.assistTarget = assist;
+    p.assistEff = damp(p.assistEff, finished ? 0 : assist, SIM.ASSIST_EASE, dt);
+    if (p.assistEff < 1e-4 && assist === 0) p.assistEff = 0;
     const pressed = held && !p.prevHeld;
     p.prevHeld = held;
     p.holdT = held ? p.holdT + dt : 0;
@@ -196,10 +253,11 @@ export class RiderSim {
       ev.push({ type: SimEvent.FINISH, data: { tick: st.tick, timeMs: st.tick * TICK_MS } });
     }
     this._derive(held);
-    return ev;
+    return ev.length ? ev.slice() : NO_EVENTS; // no garbage on quiet ticks
   }
 
   /* ------------------------------------------------------------ helpers */
+
 
   /** `target` shifted by whole turns to be nearest to the current (unwrapped) board angle. */
   _nearest(target) {
@@ -218,7 +276,7 @@ export class RiderSim {
 
   _mult() {
     const m = (1 + SIM.SCARF_SPEED_BONUS * this.state.scarf) * (1 + this._p.boostEff);
-    return Math.min(m, SIM.MAX_SPEED_MULT);
+    return Math.min(m, SIM.MAX_SPEED_MULT) * (1 + SIM.ASSIST_MAX * this._p.assistEff);
   }
 
   /** Extra push (px/s²) of the active boost: proportional to its eased bonus. */
@@ -245,7 +303,7 @@ export class RiderSim {
     const dv = Math.min(p.kickLeft, SIM.KICK_RATE * dt);
     p.kickLeft -= dv;
     if (p.phys === 'air') {
-      const sp = Math.hypot(st.vx, st.vy);
+      const sp = Math.sqrt((st.vx) * (st.vx) + (st.vy) * (st.vy));
       if (sp > 1) {
         st.vx *= (sp + dv) / sp;
         st.vy *= (sp + dv) / sp;
@@ -346,12 +404,13 @@ export class RiderSim {
     st.flips = 0;
   }
 
+  /** The ramp whose run-up / lip zone contains x, or null. */
   _onRamp(x) {
     for (const r of this._ramps) {
       if (r.x0 > x) break;
-      if (x <= r.lipX + SIM.RAMP_ZONE_AFTER_LIP) return true;
+      if (x <= r.lipX + SIM.RAMP_ZONE_AFTER_LIP) return r;
     }
-    return false;
+    return null;
   }
 
   _jump(ev, vx, vy) {
@@ -359,13 +418,14 @@ export class RiderSim {
     const p = this._p;
     p.bufferT = 0;
     st.vx = vx;
-    st.vy = vy - JUMP_VY - (this._onRamp(st.x) ? RAMP_POP : 0);
+    const ramp = this._onRamp(st.x);
+    st.vy = vy - JUMP_VY - (ramp ? rampPop(ramp.size) : 0);
     this._startAir(true);
     ev.push({ type: SimEvent.JUMP, data: {} });
   }
 
   _iceAt(x) {
-    for (const f of this.course.featuresIn(x, x)) {
+    for (const f of this._lineIdx.query(x, x, this._qa)) {
       if (f.type === FeatureType.GRIND && f.kind === GrindKind.ICE && x >= f.x0 && x < f.x1 - 2) return f;
     }
     return null;
@@ -381,14 +441,20 @@ export class RiderSim {
     st.airTime = 0;
     st.flips = 0;
     st.angVel = 0;
+    // Line chains: each line caught without touching plain snow since the last one escalates.
+    p.lineChain = g.kind === GrindKind.ICE ? 1 : p.lineChain + 1;
     ev.push({ type: SimEvent.GRIND_START, data: { featureId: g.id, kind: g.kind } });
-    this._addTrick(ev, 'grind', GRIND_LABELS[g.kind] || 'Grind', TRICKS.GRIND);
+    const spec = GRINDS[g.kind] || GRINDS.bunting;
+    this._addTrick(ev, 'grind', spec.label + (CHAIN_LABEL[p.lineChain] || ` ×${p.lineChain}`), spec.catch);
   }
 
   _endGrind(ev) {
     const p = this._p;
     if (!p.grind) return;
     ev.push({ type: SimEvent.GRIND_END, data: { featureId: p.grind.id, length: Math.round(p.grindLen) } });
+    // Exit kick: the line's speed is kept and topped up on the way off (bigger in a chain).
+    const spec = GRINDS[p.grind.kind] || GRINDS.bunting;
+    if (spec.exitKick > 0) p.kickLeft += spec.exitKick + SIM.CHAIN_KICK_STEP * Math.max(0, p.lineChain - 1);
     p.grindCooldownId = p.grind.id;
     p.grindCooldownT = SIM.GRIND_REJUMP_COOLDOWN;
     p.grind = null;
@@ -416,6 +482,7 @@ export class RiderSim {
   _ground(held, ev) {
     const st = this.state;
     const p = this._p;
+    p.lineChain = 0; // on plain snow: the line chain is over
     const c = this.course;
     const finished = st.finishTick >= 0;
     const th = Math.atan(c.slopeAt(st.x));
@@ -439,6 +506,7 @@ export class RiderSim {
     if (st.boostT > 0 && p.s < M * Math.max(REF_SPEED * 0.8, terminalSpeed(Math.tan(th)))) a += this._boostPush();
     if (finished) a -= p.s > 0 ? SIM.FINISH_BRAKE : 0;
     else a += this._recoverAccel();
+    a -= this._softDrag(p.s * Math.cos(th));
     p.s += a * dt;
     p.s = finished ? Math.max(0, p.s) : clamp(p.s, 20, SIM.MAX_GROUND_SPEED);
     const vx = p.s * Math.cos(th);
@@ -474,6 +542,12 @@ export class RiderSim {
     }
   }
 
+  /** Extra aerodynamic drag above the soft terminal speed (horizontal speed vx). */
+  _softDrag(vx) {
+    const e = vx - SIM.SOFT_V;
+    return e > 0 ? Math.min(SIM.SOFT_MAX_DECEL, SIM.SOFT_K * e * e) : 0;
+  }
+
   /** "Getting back up to pace": a push below RECOVER_BELOW × cruise, fading out as speed returns. */
   _recoverAccel() {
     const lim = SIM.RECOVER_BELOW * REF_SPEED;
@@ -498,6 +572,7 @@ export class RiderSim {
     const g = GRAVITY * (hover ? SIM.HOVER_GRAVITY : 1);
     const M = this._mult();
     st.vx -= ((DRAG_K * SIM.AIR_DRAG_MULT) / (M * M)) * st.vx * Math.abs(st.vx) * dt;
+    st.vx -= this._softDrag(st.vx) * dt;
     if (st.boostT > 0 && st.vx > 0 && st.vx < M * REF_SPEED) st.vx += this._boostPush() * dt;
     const px = st.x;
     const py = st.y;
@@ -506,23 +581,28 @@ export class RiderSim {
     st.vy += g * dt;
     st.airTime += dt;
 
-    // Rotation: only a SUSTAINED hold spins (a tap is just a jump). The spin starts once the
-    // button has been held for HOLD_T (counting from the jump press on the ground) and ramps
-    // in over FLIP_RAMP_T. Otherwise the release assist rolls back / finishes the flip.
+    // Rotation with weight: after HOLD_T of continuous hold a torque winds the spin up (capped);
+    // released, the spin carries on and decays; near upright a gentle righting torque acts.
     const under = Math.atan(c.slopeAt(st.x));
-    let spin = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
-    if (spin > 0 && !p.spinChecked && Math.abs(st.angVel) < 1) {
-      // About to start a flip: only if the arc stays up long enough to complete it (a blind hold
-      // into a rising hump keeps the board level instead of landing mid-flip).
+    let torque = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
+    if (torque > 0 && !p.spinChecked) {
+      // A plain tap-hop has no room for a flip: the held button only tucks.
       p.spinChecked = true;
       p.spinBlocked = this._timeToGround() < SIM.FLIP_MIN_AIR;
     }
-    if (p.spinBlocked) spin = 0;
-    if (spin > 0) {
-      st.angVel = damp(st.angVel, -SIM.FLIP_RATE * spin, SIM.FLIP_EASE, dt);
+    if (p.spinBlocked) torque = 0;
+    const rel0 = wrapAngle(st.angle - under);
+    if (torque > 0) {
+      st.angVel = Math.max(-SIM.FLIP_MAX_RATE, st.angVel - SIM.FLIP_TORQUE * torque * dt);
     } else {
-      st.angVel = damp(st.angVel, this._assistRate(under, hover), SIM.RELEASE_DAMP, dt);
+      const dampRate = hover ? Math.max(SIM.OPEN_DAMP, this._releasedDamp(under)) : this._releasedDamp(under);
+      st.angVel *= Math.exp(-dampRate * dt);
+      const back = under - st.angle - TAU * Math.floor((under - st.angle) / TAU); // φ past the last upright
+      if (hover) st.angVel -= SIM.HOVER_RIGHT_GAIN * rel0 * dt;
+      else if (back < SIM.EXTEND_ZONE) st.angVel += SIM.RIGHT_GAIN * back * dt; // extended early: pulled back toward the upright behind
+      else if (Math.abs(rel0) < SIM.RIGHT_ZONE) st.angVel -= SIM.RIGHT_GAIN * rel0 * dt;
     }
+    st.angVel = clamp(st.angVel, -SIM.FLIP_MAX_RATE, SIM.FLIP_MAX_RATE);
     st.angle += st.angVel * dt;
 
     // Head clearance (proximity flips, head-first crashes).
@@ -581,6 +661,7 @@ export class RiderSim {
         if (!finished) {
           ev.push({ type: SimEvent.CHASM_CLEAR, data: { featureId: oc.id } });
           this._addTrick(ev, 'chasmJump', 'Chasm Jump', TRICKS.CHASM);
+          p.kickLeft += TRICKS.CHASM_KICK;
         }
       }
     }
@@ -596,6 +677,16 @@ export class RiderSim {
     const vInto = -st.vx * Math.sin(under) + st.vy * Math.cos(under);
     const tipDown = st.airTime > SIM.TIP_GRACE && vInto > 0 && st.y + this._tipLift(st.angle - under) >= surfY;
     if (!ch && (st.y >= surfY || tipDown)) this._land(ev);
+  }
+
+  /** Spin decay rate while released: tuck / extend by rotation phase (see SIM.EXTEND_ZONE…). */
+  _releasedDamp(under) {
+    const d = under - this.state.angle; // back-rotation relative to the slope below
+    const phi = d - TAU * Math.floor(d / TAU); // 0 … 2π past the last upright
+    if (phi < SIM.EXTEND_ZONE) return SIM.EXTEND_DAMP;
+    if (phi < SIM.COMMIT_ANGLE) return SIM.RISKY_DAMP;
+    if (phi < TAU - SIM.OPEN_ZONE) return SIM.TUCK_DAMP;
+    return SIM.OPEN_DAMP;
   }
 
   /** Ballistic time until the rider would touch the snow (or 3 s), ignoring drag. */
@@ -621,26 +712,8 @@ export class RiderSim {
   }
 
   /**
-   * Target angular velocity while the button is up in the air (see SIM.ASSIST_*).
-   * d = back-rotation relative to the slope below; k whole flips + phase phi in [0, 2π).
-   */
-  _assistRate(under, hover) {
-    const d = under - this.state.angle;
-    const k = Math.floor(d / TAU);
-    const phi = d - k * TAU;
-    let target;
-    let cap = SIM.ASSIST_RATE;
-    if (hover) target = Math.round(d / TAU) * TAU;
-    else if (phi <= SIM.ASSIST_ROLLBACK) target = k * TAU;
-    else if (phi >= TAU - SIM.ASSIST_FINISH) {
-      target = (k + 1) * TAU;
-      cap = Math.max(cap, Math.min(SIM.FLIP_RATE, Math.abs(this.state.angVel))); // momentum carries the flip home
-    } else return 0; // committed: no rescue
-    return clamp(SIM.ASSIST_GAIN * (d - target), -cap, cap);
-  }
-
-  /**
    * Touchdown, graded by the board angle relative to the slope:
+   *   (the angle is the worse of now and LAND_SPIN_LOOK ahead at the current spin)
    *   CLEAN   ≤ LAND_CLEAN_ANGLE   — keeps the tangential speed, banks the combo
    *   SKETCHY ≤ LAND_SKETCHY_ANGLE — slides it out: combo lost, small speed loss, wobble
    *   CRASH   beyond (or head-down) — tumbles, sliding along the slope
@@ -653,7 +726,8 @@ export class RiderSim {
     const finished = st.finishTick >= 0;
     const th = Math.atan(c.slopeAt(st.x));
     const rel = wrapAngle(st.angle - th);
-    const ar = Math.abs(rel);
+    // Judged on the worse of the angle now and where the spin is taking the board.
+    const ar = Math.max(Math.abs(rel), Math.abs(rel + st.angVel * SIM.LAND_SPIN_LOOK));
     const vt = st.vx * Math.cos(th) + st.vy * Math.sin(th);
     const vn = -st.vx * Math.sin(th) + st.vy * Math.cos(th);
     const impact = clamp(vn / SIM.IMPACT_REF, 0, 1);
@@ -700,7 +774,7 @@ export class RiderSim {
     const p = this._p;
     const c = this.course;
     const x = st.x;
-    const list = c.featuresIn(Math.min(px, x), Math.max(px, x));
+    const list = this._lineIdx.query(Math.min(px, x), Math.max(px, x), this._qb);
     for (const g of list) {
       if (g.type !== FeatureType.GRIND || g.kind === GrindKind.ICE) continue;
       if (x < g.x0 || x > g.x1) continue;
@@ -745,9 +819,11 @@ export class RiderSim {
     }
     const M = this._mult();
     let a = GRAVITY * Math.sin(th) - ((DRAG_K * (ice ? SIM.ICE_DRAG_MULT : SIM.GRIND_DRAG_MULT)) / (M * M)) * p.s * p.s;
-    if (p.s < SIM.GRIND_CAP * M * REF_SPEED) a += ice ? SIM.ICE_ACCEL : SIM.GRIND_ACCEL;
+    const spec = GRINDS[g.kind] || GRINDS.bunting;
+    if (p.s < SIM.GRIND_CAP * M * REF_SPEED) a += spec.accel * (1 + SIM.CHAIN_ACCEL_STEP * Math.max(0, p.lineChain - 1));
     if (st.boostT > 0 && p.s < M * REF_SPEED) a += this._boostPush();
     a += this._recoverAccel();
+    a -= this._softDrag(p.s * Math.cos(th));
     p.s = clamp(p.s + a * dt, 40, SIM.MAX_GROUND_SPEED);
     const dx = p.s * Math.cos(th) * dt;
     const nx = st.x + dx;
@@ -756,7 +832,7 @@ export class RiderSim {
     p.grindDist += dx;
     while (p.grindDist >= SIM.GRIND_POINTS_EVERY) {
       p.grindDist -= SIM.GRIND_POINTS_EVERY;
-      if (!finished) st.combo.points += SIM.GRIND_POINTS;
+      if (!finished) st.combo.points += spec.perStep;
     }
     if (nx >= g.x1) {
       st.x = nx;
@@ -792,7 +868,7 @@ export class RiderSim {
     const p = this._p;
     const c = this.course;
     if (p.invulnT > 0 || st.hoverT > 0) return;
-    const list = c.featuresIn(Math.min(px, st.x) - 60, Math.max(px, st.x) + 60);
+    const list = this._solidIdx.query(Math.min(px, st.x) - 60, Math.max(px, st.x) + 60, this._qc);
     for (const f of list) {
       const kind = SOLID[f.type];
       if (!kind || this.consumed.has(f.id)) continue;
@@ -884,6 +960,7 @@ export class RiderSim {
   _loseRun(resetScarf) {
     const st = this.state;
     const p = this._p;
+    p.lineChain = 0;
     st.stats.crashes++;
     st.combo.points = 0;
     st.combo.mult = 0;
@@ -955,7 +1032,7 @@ export class RiderSim {
     // Only if the tumble ended inside an obstacle: step past it.
     for (let iter = 0; iter < 6; iter++) {
       let moved = false;
-      for (const f of c.featuresIn(x - 120, x + 120)) {
+      for (const f of this._solidIdx.query(x - 120, x + 120, this._qd)) {
         const half = f.w ? f.w / 2 : f.size;
         if (SOLID[f.type] && !this.consumed.has(f.id) && Math.abs(f.x - x) < half + 4) {
           x = f.x + half + SIM.RESPAWN_CLEAR;
@@ -1013,7 +1090,7 @@ export class RiderSim {
     };
     // End speed along the path = release speed (continuous hand-off).
     const r = p.rescue;
-    const tail = 3 * Math.hypot(r.P3.x - r.P2.x, r.P3.y - r.P2.y);
+    const tail = 3 * Math.sqrt((r.P3.x - r.P2.x) * (r.P3.x - r.P2.x) + (r.P3.y - r.P2.y) * (r.P3.y - r.P2.y));
     r.m = (SIM.RESCUE_RELEASE * REF_SPEED * SIM.RESCUE_T) / tail;
     p.phys = 'rescue';
     st.angVel = 0;
@@ -1064,7 +1141,7 @@ export class RiderSim {
     const by = st.y - BODY_CENTER * Math.cos(st.angle);
     const magnet = st.magnetT > 0;
     const R = magnet ? SIM.MAGNET_RADIUS : SIM.PICKUP_RADIUS;
-    for (const f of this.course.featuresIn(bx - R, bx + R)) {
+    for (const f of this._pickIdx.query(bx - R, bx + R, this._qe)) {
       if (f.type !== FeatureType.PICKUP || this.consumed.has(f.id)) continue;
       const rr = f.kind === PickupKind.COIN ? R : SIM.PICKUP_RADIUS;
       const dx = f.x - bx;
@@ -1075,6 +1152,7 @@ export class RiderSim {
       if (f.kind === PickupKind.COIN) {
         st.stats.coins++;
         st.scarf = Math.min(1, st.scarf + SIM.SCARF_PER_COIN);
+        p.kickLeft += TRICKS.COIN_KICK;
         if (p.phys === 'air' || p.phys === 'grind') st.combo.points += TRICKS.COIN;
         else st.stats.score += TRICKS.COIN;
       } else if (f.kind === PickupKind.FEATHER) {
@@ -1091,7 +1169,7 @@ export class RiderSim {
     const st = this.state;
     const p = this._p;
     const c = this.course;
-    st.speed = Math.hypot(st.vx, st.vy);
+    st.speed = Math.sqrt((st.vx) * (st.vx) + (st.vy) * (st.vy));
     if (st.speed > st.stats.topSpeed) st.stats.topSpeed = st.speed;
     st.progress = clamp((st.x - c.startX) / c.length, 0, 1);
     let target = 0.2;

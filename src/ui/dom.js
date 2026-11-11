@@ -54,11 +54,17 @@ export function setText(el, value) {
   }
 }
 
-/** Restarts a CSS animation class on an element. */
+/**
+ * Restarts a CSS animation class on an element without forcing a synchronous layout: the class is
+ * removed now and added back on the next animation frame (the style pass in between restarts it).
+ */
 export function replay(el, className) {
   el.classList.remove(className);
-  void el.offsetWidth; // reflow so the animation starts again
-  el.classList.add(className);
+  if (el.__replay) cancelAnimationFrame(el.__replay);
+  el.__replay = requestAnimationFrame(() => {
+    el.__replay = 0;
+    el.classList.add(className);
+  });
 }
 
 export const prefersReducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;

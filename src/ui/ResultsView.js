@@ -17,7 +17,8 @@ export class ResultsView {
     this.winnerEl = h('h2', { class: 'results__winner', 'data-testid': 'results-winner' });
     this.winTimeEl = h('p', { class: 'results__time' });
     this.podium = h('div', { class: 'podium', 'data-testid': 'podium' });
-    const hero = h('div', { class: 'results__hero reveal', style: { '--d': '0ms' } }, this.metaEl, this.winnerEl, this.winTimeEl, this.podium);
+    this.awardsEl = h('div', { class: 'awards', 'data-testid': 'awards' });
+    const hero = h('div', { class: 'results__hero reveal', style: { '--d': '0ms' } }, this.metaEl, this.winnerEl, this.winTimeEl, this.awardsEl, this.podium);
 
     this.saveEl = h('span', { class: 'chip', 'data-testid': 'save-status' });
     this.list = h('ol', { class: 'ranking', 'data-testid': 'results-list' });
@@ -32,7 +33,10 @@ export class ResultsView {
       h('span', { class: 'c-combo' }, 'Best combo')
     );
 
-    this.againBtn = h('button', { class: 'btn btn--primary', type: 'button', 'data-testid': 'play-again', onclick: () => this.handlers.onPlayAgain?.() }, h('span', { class: 'btn__label' }, 'Race again'));
+    this.againBtn = h('button', { class: 'btn btn--primary', type: 'button', 'data-testid': 'play-again', onclick: () => this.handlers.onPlayAgain?.() }, h('span', { class: 'btn__label' }, 'Rematch'));
+    this.settingsBtn = h('button', { class: 'btn btn--ghost', type: 'button', 'data-testid': 'change-settings', onclick: () => this.handlers.onChangeSettings?.() }, h('span', { class: 'btn__label' }, 'Change settings'));
+    this.guestHint = h('p', { class: 'results__hint', 'data-testid': 'rematch-hint', hidden: true });
+    this.journeyEl = h('p', { class: 'journey', 'data-testid': 'journey', hidden: true });
     this.backBtn = h('button', { class: 'btn btn--primary', type: 'button', 'data-testid': 'back-to-lobby', onclick: () => this.handlers.onBackToLobby?.() }, h('span', { class: 'btn__label' }, 'Back to lobby'));
     this.fameBtn = h('button', { class: 'btn btn--ghost', type: 'button', 'data-testid': 'results-hall-of-fame', onclick: () => this.handlers.openFame() }, icon(ICONS.trophy, 'icon icon--sm'), h('span', { class: 'btn__label' }, 'Hall of fame'));
     this.leaveBtn = h('button', { class: 'btn btn--ghost', type: 'button', 'data-testid': 'results-leave', onclick: () => this.handlers.onLeave?.() }, h('span', { class: 'btn__label' }, 'Leave'));
@@ -43,13 +47,22 @@ export class ResultsView {
       h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, 'Ranking'), this.saveEl),
       head,
       this.list,
-      h('div', { class: 'results__actions' }, this.againBtn, this.backBtn, this.fameBtn, this.leaveBtn)
+      this.journeyEl,
+      this.guestHint,
+      h('div', { class: 'results__actions' }, this.againBtn, this.settingsBtn, this.backBtn, this.fameBtn, this.leaveBtn)
     );
 
     this.el = h('section', { class: 'screen screen--results', 'data-screen': 'results', 'aria-label': 'Results', hidden: true }, h('div', { class: 'results__grid' }, hero, card));
   }
 
-  setResults({ results, selfId, isHost, saved }) {
+  /**
+   * @param {Object} v
+   * @param {Array<{key:string,label:string,name:string,color:string,value:string}>} [v.awards]
+   * @param {string} [v.journey]   "Started 4th · peaked 1st · finished 3rd" for the local rider
+   * @param {boolean} [v.practice] @param {string} [v.hostName]
+   */
+  setResults({ results, selfId, isHost, saved, awards = [], journey = '', practice = false, hostName = '' }) {
+    this.last = { results, selfId, isHost, saved, awards, journey, practice, hostName };
     const ranking = results?.ranking || [];
     const settings = results?.settings || {};
     const winner = ranking[0];
@@ -114,6 +127,19 @@ export class ResultsView {
     this.saveEl.hidden = !SAVE_TEXT[saved] || winnerTime < 0;
 
     this.againBtn.hidden = !isHost;
+    this.againBtn.firstChild.textContent = practice ? 'Race again' : 'Rematch';
+    this.settingsBtn.hidden = !isHost || practice;
     this.backBtn.hidden = !!isHost;
+    this.guestHint.hidden = !!isHost;
+    this.guestHint.textContent = isHost ? '' : `${hostName || 'The host'} can start the rematch.`;
+
+    this.awardsEl.replaceChildren(
+      ...awards.map((a) =>
+        h('span', { class: 'award', 'data-testid': `award-${a.key}`, style: { '--c': a.color } }, h('span', { class: 'award__label' }, a.label), h('span', { class: 'award__who' }, h('i', { class: 'award__dot' }), a.name), a.value ? h('span', { class: 'award__value' }, a.value) : null)
+      )
+    );
+    this.awardsEl.hidden = awards.length === 0;
+    this.journeyEl.textContent = journey;
+    this.journeyEl.hidden = !journey;
   }
 }

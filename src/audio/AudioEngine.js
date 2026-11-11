@@ -8,6 +8,7 @@ import { Sfx } from './Sfx.js';
  *
  *   unlock()                 call from a user gesture (safe to repeat)
  *   setMuted(bool) / muted
+ *   setVolume(0..1) / volume master volume (additive)
  *   startMusic(mood) / stopMusic()      'menu' | 'race' | 'results'
  *   onSimEvent({type,data})  SFX for SimEvents
  *   update(view)             per frame: carve hiss, wind, weather, thunder, music mood
@@ -19,13 +20,22 @@ import { Sfx } from './Sfx.js';
  * speed (px/s) treated as "full speed" by the speed-driven layers.
  *
  * Every public method is a silent no-op before unlock and never throws.
+ *
+ * CPU: the realtime context is suspended while muted (after the fade) and while the tab is
+ * hidden, so nothing is rendered or scheduled then; the reverb is a ~2 s generated impulse.
  */
 const MASTER_LEVEL = 0.8;
 const LOOKAHEAD = 0.3;
+/** Reverb impulse length (s) and decay exponent. 2 s keeps the snowy space at < half the convolution cost of 4.5 s. */
+const REVERB_S = 2.1;
+const REVERB_DECAY = 2.4;
+/** After a mute fade, the context is suspended (s). */
+const SUSPEND_AFTER = 0.35;
 
 export class AudioEngine {
   constructor(opts = {}) {
     this.muted = !!opts.muted;
+    this.volume = clamp(opts.volume ?? 1, 0, 1);
     this.seed = opts.seed ?? 20241;
     this.speedRef = opts.speedRef ?? 1000;
     this.ctx = null;
@@ -33,6 +43,36 @@ export class AudioEngine {
     this._pendingMood = null;
     this._timer = null;
     this._realtime = true;
+    this._suspendTimer = null;
+    this._hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    this._onVisibility = () => {
+      this._hidden = document.visibilityState === 'hidden';
+      this._applyRunState();
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this._onVisibility);
+  }
+
+  /** Master gain target for the current mute/volume. */
+  _level() {
+    return this.muted ? 0 : MASTER_LEVEL * this.volume * this.volume; // squared: perceptually even slider
+  }
+
+  /** Realtime only: run the context while audible and visible, suspend it otherwise. */
+  _applyRunState() {
+    if (!this._realtime || !this.ctx) return;
+    clearTimeout(this._suspendTimer);
+    const want = !this.muted && !this._hidden && this.volume > 0;
+    try {
+      if (want) {
+        if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      } else if (this.ctx.state === 'running') {
+        // hidden: stop now; muted: let the fade finish first
+        const delay = this._hidden ? 0 : SUSPEND_AFTER * 1000;
+        this._suspendTimer = setTimeout(() => {
+          if ((this.muted || this._hidden || this.volume <= 0) && this.ctx.state === 'running') this.ctx.suspend().catch(() => {});
+        }, delay);
+      }
+    } catch (e) { /* ignore */ }
   }
 
   /** Build the engine on an existing (e.g. offline) context. */
@@ -46,7 +86,7 @@ export class AudioEngine {
   unlock() {
     try {
       if (this.ctx) {
-        if (this.ctx.state === 'suspended' && this.ctx.resume) this.ctx.resume().catch(() => {});
+        if (this.ctx.state === 'suspended' && !this.muted && !this._hidden && this.volume > 0) this.ctx.resume().catch(() => {});
         return;
       }
       if (typeof window === 'undefined') return;
@@ -54,6 +94,7 @@ export class AudioEngine {
       if (!AC) return;
       this._init(new AC({ latencyHint: 'interactive' }));
       if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      this._applyRunState();
     } catch (e) {
       this.ctx = null;
       this.ready = false;
@@ -72,7 +113,7 @@ export class AudioEngine {
 
     // master: gain -> compressor -> limiter -> soft clip -> destination
     this.master = ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : MASTER_LEVEL;
+    this.master.gain.value = this._level();
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -16; comp.knee.value = 14; comp.ratio.value = 5;
     comp.attack.value = 0.006; comp.release.value = 0.25;
@@ -88,7 +129,7 @@ export class AudioEngine {
 
     // reverb
     this.reverb = ctx.createConvolver();
-    this.reverb.buffer = makeImpulse(ctx, 4.5, 3.2, rng);
+    this.reverb.buffer = makeImpulse(ctx, REVERB_S, REVERB_DECAY, rng);
     this.revIn = ctx.createGain();
     this.revIn.gain.value = 1;
     const revOut = ctx.createGain();
@@ -139,7 +180,7 @@ export class AudioEngine {
 
   _pump() {
     try {
-      if (!this.ready) return;
+      if (!this.ready || this.ctx.state !== 'running') return;
       this.music.scheduleUntil(this.ctx.currentTime + LOOKAHEAD);
     } catch (e) { /* never throw from a timer */ }
   }
@@ -160,12 +201,23 @@ export class AudioEngine {
 
   setMuted(muted) {
     this.muted = !!muted;
+    this._applyLevel();
+  }
+
+  /** Additive: master volume 0..1 (persisted by the game). */
+  setVolume(v) {
+    this.volume = clamp(Number(v) || 0, 0, 1);
+    this._applyLevel();
+  }
+
+  _applyLevel() {
     try {
       if (!this.ready) return;
       const t = this.ctx.currentTime;
       this.master.gain.cancelScheduledValues(t);
       this.master.gain.setValueAtTime(this.master.gain.value, t);
-      this.master.gain.setTargetAtTime(this.muted ? 0 : MASTER_LEVEL, t, 0.06);
+      this.master.gain.setTargetAtTime(this._level(), t, 0.06);
+      this._applyRunState();
     } catch (e) { /* ignore */ }
   }
 
@@ -200,7 +252,7 @@ export class AudioEngine {
 
   update(view) {
     try {
-      if (!this.ready || !view) return;
+      if (!this.ready || !view || (this._realtime && this.ctx.state !== 'running')) return;
       this.layers.update(view);
       this.music.setIntensity((view.boostLevel || 0) / 3);
       const night = clamp(view.night || 0, 0, 1);

@@ -19,6 +19,32 @@ const BOT_COLORS = [8, 4, 1, 6, 3, 10];
 const BOT_SKILLS = [0.55, 0.3, 0.75, 0.42, 0.65, 0.2];
 /** Never simulate more than this per frame; a longer backlog is spread over the next frames. */
 const MAX_TICKS_PER_FRAME = 240;
+/**
+ * Catch-up policy. A slow frame (or a machine that is busy for a while) is caught up quickly: at least
+ * half of the backlog runs every frame, so the race never drifts behind the clock. A stall longer than
+ * MAX_TICKS_PER_FRAME (a hidden tab) runs on a time budget instead, spread over a few frames rather
+ * than freezing one frame for hundreds of milliseconds, and is flagged as a silent catch-up.
+ */
+const CATCHUP_FREE_TICKS = 8;
+const CATCHUP_BUDGET_MS = 10;
+/** A backlog this long (1 s) is a stall: its events are not replayed as sounds and toasts. */
+const SILENT_BACKLOG_TICKS = 60;
+/**
+ * Catch-up assist (RiderInput.assist): riders well behind the leader get a small cruise bonus. 0 for the
+ * leader, ramping from 0 at 4% of the course behind to 1 at 7% behind, and 0 in the last 10% of the
+ * course so the finish is earned. Deterministic per tick for the local rider and the bots (it only reads
+ * the riders' progress as this client sees it).
+ */
+const ASSIST_FROM = 0.04;
+const ASSIST_FULL = 0.07;
+const ASSIST_END = 0.9;
+export function assistFor(progress, leader) {
+  if (progress >= ASSIST_END) return 0;
+  return clamp((leader - progress - ASSIST_FROM) / (ASSIST_FULL - ASSIST_FROM), 0, 1);
+}
+/** Ticks after GO at which the "started Nth" position is taken (the start grid has spread out by then). */
+const START_POS_TICK = 90;
+const clockNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const START_SLOT_PX = 30;
 /** After GO the start-line stagger melts away over this long instead of snapping. */
 const SLOT_FADE_MS = 700;
@@ -127,15 +153,22 @@ export class Race {
     this.held = false;
     /** timestamped button edges not yet consumed by the simulation: [{t, held}] */
     this.inputQueue = [];
-    /** a press that began and ended between two ticks still has to count as one tick of input */
-    this.tapPending = false;
     this.alpha = 1;
+    /** true while a backlog bigger than a slow frame is being caught up (Game keeps that silent) */
+    this.catchingUp = false;
     /** local events since the last drain() */
     this.events = [];
     /** FinishReports of bots that crossed the line since the last drain */
     this.botFinishes = [];
     /** id → timeMs of every finish we know about (ours, bots, remote) */
     this.finishTimes = new Map();
+    /** catch-up assist on (RaceSettings.catchUp, default on) and the local rider's current value */
+    this.catchUp = settings.catchUp !== false;
+    this.localAssist = 0;
+    /** remote riders' leading progress, refreshed once per update() (ghost data changes per frame, not per tick) */
+    this.remoteLead = 0;
+    /** id → {start, best, worst, last} positions as this client sees them (for the results awards) */
+    this.positions = new Map();
   }
 
   get state() {
@@ -152,11 +185,15 @@ export class Race {
   }
 
   /**
-   * Button edge at time `t` (performance.now()). Edges are replayed at the tick they happened on, so a
-   * slow frame can neither stretch a tap into a hold nor swallow it.
+   * Button edge at time `t` (performance.now() timebase; pass the DOM event's timeStamp). Edges are
+   * replayed at the tick they happened on, so a slow frame can neither stretch a tap into a hold nor
+   * swallow it. An edge older than the last simulated tick goes to the next one (never lost).
    */
-  setInput(held, t = performance.now()) {
-    this.inputQueue.push({ t, held: !!held });
+  setInput(held, t = clockNow()) {
+    const q = this.inputQueue;
+    // Keep the queue ordered even if timestamps from different sources disagree slightly.
+    const last = q.length ? q[q.length - 1].t : -Infinity;
+    q.push({ t: Number.isFinite(t) ? Math.max(t, last) : Math.max(clockNow(), last), held: !!held });
   }
 
   /** Button state for the tick that ends at `tickEndMs`. */
@@ -189,7 +226,14 @@ export class Race {
     if (timeMs >= 0) this.finishTimes.set(id, timeMs);
   }
 
-  /** Advances the simulation to `nowMs`. Returns the number of ticks run. */
+  /**
+   * Advances the simulation to `nowMs`. Returns the number of ticks run.
+   *
+   * The tick that *contains* `nowMs` is simulated (tick n covers ((n-1)·T, n·T] after GO), not only the
+   * last completed one: a press that arrived before this frame is applied in this frame, and the drawn
+   * pose (interpolated between the last two ticks) is the pose at `nowMs`, not one tick in the past.
+   * Edges that arrive after their tick was simulated go to the next tick (≤ 1 tick of skew).
+   */
   update(nowMs) {
     if (nowMs < this.goAtMs) return 0;
     if (!this.started) {
@@ -198,30 +242,63 @@ export class Race {
       for (const b of this.bots) b.sim.start();
     }
     const elapsed = nowMs - this.goAtMs;
-    const target = Math.floor(elapsed / TICK_MS);
+    const target = Math.floor(elapsed / TICK_MS) + 1;
     const due = target - this.tick;
     const n = Math.min(due, MAX_TICKS_PER_FRAME);
-    for (let i = 0; i < n; i++) {
-      this.tick++;
-      const held = this.inputAt(this.goAtMs + this.tick * TICK_MS);
-      const input = this.local.bot ? this.local.bot.decide(this.state) : { held };
-      const events = this.local.step(input);
-      for (const e of events) {
-        this.events.push(e);
-        if (e.type === SimEvent.FINISH) this.finishTimes.set(this.local.id, Math.round(e.data.timeMs));
-      }
-      for (const b of this.bots) {
-        const was = b.sim.state.finishTick;
-        b.step(b.bot.decide(b.sim.state));
-        if (was < 0 && b.sim.state.finishTick >= 0) {
-          const report = b.report();
-          this.finishTimes.set(b.id, report.timeMs);
-          this.botFinishes.push(report);
-        }
+    const stall = due > MAX_TICKS_PER_FRAME;
+    const free = stall ? CATCHUP_FREE_TICKS : Math.max(CATCHUP_FREE_TICKS, Math.ceil(due / 2));
+    const t0 = due > free ? clockNow() : 0;
+    this.remoteLead = this.catchUp ? this.remoteLeadProgress() : 0;
+    let ran = 0;
+    for (; ran < n; ran++) {
+      if (ran >= free && clockNow() - t0 > CATCHUP_BUDGET_MS) break;
+      this.stepTick();
+    }
+    this.catchingUp = due > SILENT_BACKLOG_TICKS;
+    this.alpha = this.tick < target ? 1 : clamp(elapsed / TICK_MS - (target - 1), 0, 1);
+    return ran;
+  }
+
+  /** One fixed tick for the local rider and every bot. */
+  /** Leading progress among remote riders (finished = 1; riders who left are ignored). */
+  remoteLeadProgress() {
+    const { startX, length } = this.course;
+    let lead = 0;
+    for (const [id, r] of this.remotes) {
+      if (this.finishTimes.has(id)) return 1;
+      if (r.gone || !r.ghost.last) continue;
+      lead = Math.max(lead, clamp((r.ghost.x - startX) / length, 0, 1));
+    }
+    return lead;
+  }
+
+  stepTick() {
+    this.tick++;
+    // Catch-up assist, from progress at the start of this tick.
+    let leader = this.remoteLead;
+    if (this.catchUp) {
+      leader = Math.max(leader, this.state.finishTick >= 0 ? 1 : this.state.progress);
+      for (const b of this.bots) leader = Math.max(leader, b.sim.state.finishTick >= 0 ? 1 : b.sim.state.progress);
+    }
+    const assistOf = (st) => (this.catchUp && st.finishTick < 0 ? assistFor(st.progress, leader) : 0);
+    const held = this.inputAt(this.goAtMs + this.tick * TICK_MS);
+    this.localAssist = assistOf(this.state);
+    const input = this.local.bot ? { held: !!this.local.bot.decide(this.state)?.held, assist: this.localAssist } : { held, assist: this.localAssist };
+    const events = this.local.step(input);
+    for (const e of events) {
+      this.events.push(e);
+      if (e.type === SimEvent.FINISH) this.finishTimes.set(this.local.id, Math.round(e.data.timeMs));
+    }
+    for (const b of this.bots) {
+      const was = b.sim.state.finishTick;
+      const assist = assistOf(b.sim.state);
+      b.step({ held: !!b.bot.decide(b.sim.state)?.held, assist });
+      if (was < 0 && b.sim.state.finishTick >= 0) {
+        const report = b.report();
+        this.finishTimes.set(b.id, report.timeMs);
+        this.botFinishes.push(report);
       }
     }
-    this.alpha = due > n ? 1 : clamp(elapsed / TICK_MS - target, 0, 1);
-    return n;
   }
 
   drainEvents() {
@@ -279,6 +356,50 @@ export class Race {
       rows.push({ id, name: info.name, color: PLAYER_COLORS[info.colorIndex] ?? PLAYER_COLORS[0], progress: finished ? 1 : clamp((ghost.x - startX) / length, 0, 1), isLocal: false, finished });
     }
     return rows;
+  }
+
+  /**
+   * Places of every rider in `rows` (finishers by time, then by progress): id → 1-based place.
+   * Also records each rider's start / best / worst place (call it a few times a second).
+   */
+  notePositions(rows = this.standings()) {
+    const order = rows
+      .map((r) => ({ id: r.id, t: this.finishTimes.get(r.id), p: r.progress }))
+      .sort((a, b) => (a.t !== undefined && b.t !== undefined ? a.t - b.t : a.t !== undefined ? -1 : b.t !== undefined ? 1 : b.p - a.p));
+    const places = new Map(order.map((r, i) => [r.id, i + 1]));
+    if (this.started && this.tick >= START_POS_TICK) {
+      for (const [id, place] of places) {
+        const rec = this.positions.get(id);
+        if (!rec) this.positions.set(id, { start: place, best: place, worst: place, last: place });
+        else {
+          rec.best = Math.min(rec.best, place);
+          rec.worst = Math.max(rec.worst, place);
+          rec.last = place;
+        }
+      }
+    }
+    return places;
+  }
+
+  /**
+   * Nearest rider ahead of and behind the local rider, with the gap in seconds at the local rider's
+   * current speed (gapS > 0 = ahead). Finished riders are left out. Rows are from standings().
+   */
+  gaps(rows = this.standings()) {
+    const me = rows.find((r) => r.isLocal);
+    if (!me || me.finished) return { ahead: null, behind: null };
+    const speed = Math.max(150, this.state.speed || 0);
+    const len = this.course.length;
+    let ahead = null;
+    let behind = null;
+    for (const r of rows) {
+      if (r.isLocal || r.finished) continue;
+      const d = (r.progress - me.progress) * len;
+      if (d >= 0 && (!ahead || d < ahead.d)) ahead = { id: r.id, name: r.name, d };
+      if (d < 0 && (!behind || d > behind.d)) behind = { id: r.id, name: r.name, d };
+    }
+    for (const g of [ahead, behind]) if (g) g.gapS = g.d / speed;
+    return { ahead, behind };
   }
 
   /** 1-based live position of the local rider. */

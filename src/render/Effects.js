@@ -128,6 +128,23 @@ export class Effects {
     ctx.globalAlpha = 1;
   }
 
+  drawVignette(ctx, L, a) {
+    const ex = L.w * 0.11;
+    const ey = L.h * 0.14;
+    const edge = (x0, y0, x1, y1, rx, ry, rw, rh) => {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, `rgba(0,0,0,${a})`);
+      g.addColorStop(0.55, `rgba(0,0,0,${a * 0.25})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(rx, ry, rw, rh);
+    };
+    edge(0, 0, 0, ey, 0, 0, L.w, ey);
+    edge(0, L.h, 0, L.h - ey, 0, L.h - ey, L.w, ey);
+    edge(0, 0, ex, 0, 0, 0, ex, L.h);
+    edge(L.w, 0, L.w - ex, 0, L.w - ex, 0, ex, L.h);
+  }
+
   /** Boost streaks + warmth + vignette + flash. */
   drawPost(ctx, atm, P, L, fx) {
     const t = L.t;
@@ -195,12 +212,12 @@ export class Effects {
       ctx.fillStyle = `rgba(255,240,215,${0.22 * fx.pulse})`;
       ctx.fillRect(0, 0, L.w, L.h);
     }
-    // vignette
-    const va = clamp(0.2 + atm.night * 0.25 + (atm.weather === 'storm' ? 0.15 * atm.weatherAmt : 0) + boost * 0.1, 0, 0.7);
-    ctx.globalAlpha = va;
-    ctx.drawImage(this.vignette, 0, 0, L.w, L.h);
-    ctx.globalAlpha = 1;
-    if (atm.flash > 0.01) {
+    // vignette: four edge gradients (the centre is never touched — much cheaper than a full-screen image)
+    if (fx.vignette !== false) {
+      const va = clamp(0.2 + atm.night * 0.25 + (atm.weather === 'storm' ? 0.15 * atm.weatherAmt : 0) + boost * 0.1, 0, 0.7);
+      this.drawVignette(ctx, L, va * 0.6);
+    }
+    if (atm.flash > 0.01 && !fx.reduced) {
       ctx.fillStyle = `rgba(235,240,255,${0.3 * atm.flash})`;
       ctx.fillRect(0, 0, L.w, L.h);
     }

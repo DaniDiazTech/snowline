@@ -265,12 +265,15 @@ function bunting(ctx, f, P, course) {
     const ya = course.grindY(f, x - 6);
     const yb = course.grindY(f, x + 6);
     const col = P.festive[(i + (f.variant | 0)) % P.festive.length];
-    const fl = Math.sin(t * 6.5 + i * 0.9 + x0 * 0.01) * (2.5 + 2 * P.wind);
+    // the rider's wake: flags just passed whip forward and lift, then settle
+    const dx = (P.riderX ?? -1e9) - x;
+    const wake = dx > -10 && dx < 260 ? Math.exp(-Math.max(0, dx) / 90) * Math.min(1, (P.riderV || 0) / 600) : 0;
+    const fl = Math.sin(t * (6.5 + 10 * wake) + i * 0.9 + x0 * 0.01) * (2.5 + 2 * P.wind + 5 * wake) + wake * 7;
     ctx.fillStyle = rgba(col);
     ctx.beginPath();
     ctx.moveTo(x - 6, ya + 1);
     ctx.lineTo(x + 6, yb + 1);
-    ctx.lineTo(x + fl, (ya + yb) / 2 + 15 + Math.cos(t * 5 + i) * 1.2);
+    ctx.lineTo(x + fl, (ya + yb) / 2 + 15 - wake * 6 + Math.cos(t * 5 + i) * 1.2);
     ctx.closePath();
     ctx.fill();
   }

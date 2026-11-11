@@ -88,31 +88,44 @@ export class RiderRenderer {
     const idle = mode === RiderMode.IDLE;
     const finished = mode === RiderMode.FINISHED;
     let c = clamp(v.crouch || 0, 0, 1);
-    if (grind) c = Math.max(c, 0.3);
+    if (grind) c = Math.max(c, 0.55);
     if (idle) c = 0.05;
     if (crashed) c = Math.max(c, 0.7); // tucked roll
     if (rescue) c = 0.12;
-    // landing: knees absorb (fast compress, slower recovery) and the body leans back a touch
+    // landing: knees absorb — deeper and a little longer for heavier impacts, no overshoot
     const la = vs ? vs.landAge : 9;
-    const squash = la < 0.6 ? vs.landK * (la < 0.07 ? la / 0.07 : Math.exp(-(la - 0.07) / 0.13)) : 0;
-    c = clamp(c + squash * 0.55, 0, 1);
+    const lk = vs ? vs.landK : 0;
+    const squash = la < 0.9 ? lk * (la < 0.06 ? la / 0.06 : Math.exp(-(la - 0.06) / (0.11 + 0.16 * lk))) : 0;
+    c = c + squash * 0.75;
+    // take-off: a quick compress carried into a spring/extension (legs straighten)
+    const tk = vs ? vs.takeoffAge : 9;
+    if (air && tk < 0.24) c += tk < 0.05 ? 0.45 * (1 - tk / 0.05) : -0.25 * Math.sin((Math.PI * (tk - 0.05)) / 0.19);
+    // air: the flip phase decides the tuck (knees to chest when tucked, extended otherwise)
+    const tuck = air && vs ? vs.tuck : 0;
+    if (air) c = (tk < 0.24 ? c - clamp(v.crouch || 0, 0, 1) : 0) + 0.15 + 0.85 * tuck;
+    c = clamp(c, -0.25, 1);
     const wa = vs ? vs.wobbleAge : 9;
     const wobble = wa < 0.45 ? 1 - wa / 0.45 : 0;
     const bob = mode === RiderMode.GROUND ? Math.sin(t * 6.5) * 0.4 : 0;
 
     set(J.f1, -7.5, -3);
     set(J.f2, 7.5, -3);
-    set(J.h, -1 + 2.5 * c, -21 + 8.5 * c + bob);
+    set(J.h, -1 + 2.5 * c + squash * 2, -21 + 8.5 * c + bob);
     const kneeOut = 2.5 + 3 * c;
     set(J.k1, (J.f1.x + J.h.x) / 2 + kneeOut * 0.6, (J.f1.y + J.h.y) / 2 + 0.5);
     set(J.k2, (J.f2.x + J.h.x) / 2 + kneeOut, (J.f2.y + J.h.y) / 2 - 0.5);
-    let lean = 0.14 + 0.62 * c + (air ? 0.06 : 0) - squash * 0.5;
+    // landing shifts the weight slightly forward; in the air, descending with little spin = spotting the landing
+    const spot = air && vs && vs.spot && tuck < 0.5 ? 0.18 : 0;
+    let lean = 0.14 + 0.62 * Math.max(0, c) + (air ? 0.06 : 0) + squash * 0.22 + spot;
     if (crashed) lean = 0.9 + Math.sin(t * 9) * 0.25;
     if (finished || rescue) lean = 0.02;
+    if (grind) lean += 0.18;
     lean += Math.sin(wa * 30) * 0.28 * wobble;
     const tl = 12.5 - 2 * c;
     set(J.n, J.h.x + Math.sin(lean) * tl, J.h.y - Math.cos(lean) * tl);
-    set(J.hd, J.n.x + Math.sin(lean) * 5.2 + 0.6, J.n.y - Math.cos(lean) * 5.2);
+    // head leads the rotation a touch (and looks down at the landing when spotting)
+    const lead = vs ? clamp(vs.omega * 0.05, -0.32, 0.32) + spot * 0.8 : 0;
+    set(J.hd, J.n.x + Math.sin(lean + lead) * 5.2 + 0.6, J.n.y - Math.cos(lean + lead) * 5.2);
 
     // hands/elbows relative to the neck
     let a1x;
@@ -144,16 +157,18 @@ export class RiderRenderer {
       a1y = -2 + flap;
       a2x = 12.5;
       a2y = -3.5 - flap;
-      // tucked flip: hands reach for the board (grab)
-      a1x = lerp(a1x, J.h.x - J.n.x - 2, c);
-      a1y = lerp(a1y, J.h.y - J.n.y + 9, c);
-      a2x = lerp(a2x, J.h.x - J.n.x + 6, c);
-      a2y = lerp(a2y, J.h.y - J.n.y + 10, c);
+      // spinning: arms come in, and at high spin the hands grab the board
+      const g = Math.max(clamp(c, 0, 1) * 0.6, tuck);
+      a1x = lerp(a1x, J.h.x - J.n.x - 2, g);
+      a1y = lerp(a1y, J.h.y - J.n.y + 9, g);
+      a2x = lerp(a2x, J.h.x - J.n.x + 6, g);
+      a2y = lerp(a2y, J.h.y - J.n.y + 10, g);
     } else if (grind) {
-      a1x = -13.5;
-      a1y = 1 + Math.sin(t * 7) * 1.2;
-      a2x = 13.5;
-      a2y = -0.5 - Math.sin(t * 7) * 1.2;
+      // fast line: rear arm trailing low behind, front arm forward for balance
+      a1x = -14;
+      a1y = 4 + Math.sin(t * 9) * 0.8;
+      a2x = 11;
+      a2y = 1 - Math.sin(t * 9) * 0.8;
     } else if (finished) {
       a1x = -8;
       a1y = 7;
@@ -189,7 +204,7 @@ export class RiderRenderer {
   visOf(v) {
     let vs = this.vis.get(v.id);
     if (!vs) {
-      vs = { a: v.angle, prevTarget: v.angle, j: null, lift: 0, landAge: 9, landK: 0, wobbleAge: 9, prevMode: v.mode, prevVy: v.vy, rescueAge: 9, seen: 0 };
+      vs = { a: v.angle, prevTarget: v.angle, prevRaw: v.angle, omega: 0, rot: 0, tuck: 0, takeoffAge: 9, baseA: v.angle, airW: 0, j: null, lift: 0, landAge: 9, landK: 0, wobbleAge: 9, prevMode: v.mode, prevVy: v.vy, rescueAge: 9, seen: 0 };
       this.vis.set(v.id, vs);
     }
     return vs;
@@ -204,6 +219,25 @@ export class RiderRenderer {
     // timers + transitions
     vs.landAge += dt;
     vs.wobbleAge += dt;
+    vs.takeoffAge += dt;
+    // angular velocity from successive angles (rad/s), lightly smoothed; jumps are ignored
+    if (dt > 0) {
+      const dA = wrapAngle(v.angle - vs.prevRaw);
+      const w = Math.abs(dA) < 0.6 ? dA / dt : vs.omega;
+      vs.omega += (w - vs.omega) * (1 - Math.exp(-dt * 14));
+    }
+    // back-rotation accumulated since take-off (a backflip decreases the angle → positive)
+    if (mode === RiderMode.AIR && dt > 0) {
+      const dA = wrapAngle(v.angle - vs.prevRaw);
+      if (Math.abs(dA) < 0.6) vs.rot -= dA;
+    }
+    vs.prevRaw = v.angle;
+    if (mode === RiderMode.AIR && (vs.prevMode === RiderMode.GROUND || vs.prevMode === RiderMode.GRIND || vs.prevMode === RiderMode.IDLE)) {
+      vs.takeoffAge = 0;
+      vs.baseA = vs.a;
+      vs.rot = 0;
+      if (this.onTakeoff) this.onTakeoff(v);
+    }
     if ((vs.prevMode === RiderMode.AIR) && (mode === RiderMode.GROUND || mode === RiderMode.FINISHED) && vs.landAge > 0.25) {
       // touchdown seen without an event (ghosts): squash by how hard it came down
       vs.landAge = 0;
@@ -215,6 +249,28 @@ export class RiderRenderer {
     } else if (vs.prevMode === RiderMode.RESCUE) {
       // set down: the balloon lets go and drifts away
       if (this.departing.length < 16) this.departing.push({ x: v.x, y: v.y - 46 * K - 70, color: v.color, age: 0, ghost: !v.isLocal });
+    }
+
+    // tuck by flip phase (mirrors the sim): held → wind-up tuck; released → extend (< 120°),
+    // risky (120–160°), tucked carry (160–275°), open up / spot the landing (last 85°)
+    {
+      let want = 0;
+      if (mode === RiderMode.AIR) {
+        const w = Math.abs(vs.omega);
+        const held = (v.crouch || 0) > 0.75;
+        const phi = ((vs.rot % TAU) + TAU) % TAU;
+        const deg = (phi * 180) / Math.PI;
+        if (held && (w > 0.5 || vs.rot > 0.1)) want = 0.55 + 0.45 * smooth(2, 7, w);
+        else if (held) want = 0.45; // holding before the torque kicks in: crouched, ready
+        else if (w > 1.2 || vs.rot > 0.3) {
+          if (deg < 120) want = 0;
+          else if (deg < 160) want = 0.5;
+          else if (deg < 275) want = 1;
+          else want = 1 - smooth(275, 330, deg);
+        }
+        vs.spot = !held && ((vs.rot > 0.3 && deg >= 275) || (w < 1.2 && v.vy > 120));
+      } else vs.spot = false;
+      vs.tuck += (want - vs.tuck) * (1 - Math.exp(-dt * 14));
     }
 
     // target joints, then cross-fade (≈150 ms) from what was drawn last frame
@@ -250,6 +306,21 @@ export class RiderRenderer {
     const ca = Math.cos(ang);
     const sa = Math.sin(ang);
 
+    // airborne rotation pivots about the centre of mass (≈ hip height), not the board: the
+    // board is drawn where the body's spin puts it. The reference orientation follows the drawn
+    // angle whenever the rider is not spinning, so take-off and touchdown line up exactly.
+    const spinNow = smooth(1.2, 5.2, Math.abs(vs.omega));
+    vs.airW += ((mode === RiderMode.AIR ? 1 : 0) - vs.airW) * (1 - Math.exp(-dt * (mode === RiderMode.AIR ? 12 : 30)));
+    vs.baseA += wrapAngle(ang - vs.baseA) * (1 - Math.exp(-dt * 7 * (1 - spinNow)));
+    let ox = 0;
+    let oy = 0;
+    if (vs.airW > 0.001 && !this.noSmooth) {
+      const hC = COM_H * K;
+      // contact' = contact + R(baseA)·(0,-h) − R(ang)·(0,-h)
+      ox = (Math.sin(vs.baseA) - sa) * hC * vs.airW;
+      oy = (-Math.cos(vs.baseA) + ca) * hC * vs.airW;
+    }
+
     // ground contact: lift the drawn rider so the lowest board tip (or, tumbling, any limb)
     // rests on the snow line instead of cutting into it. Rises instantly, settles smoothly.
     let need = 0;
@@ -263,23 +334,26 @@ export class RiderRenderer {
           lx = p.x;
           ly = p.y;
         }
-        const wx = v.x + (lx * ca - ly * sa) * K;
-        const wy = v.y + (lx * sa + ly * ca) * K + pts[i + 2] * K;
-        const pen = wy - (this.groundAt(wx) + 0.5);
+        const wx = v.x + ox + (lx * ca - ly * sa) * K;
+        const wy = v.y + oy + (lx * sa + ly * ca) * K + pts[i + 2] * K;
+        // the TRUE surface (pit floor inside a gap), so a rider falling into a pit is not held up
+        const pen = wy - ((this.surfaceAt ? this.surfaceAt(wx) : this.groundAt(wx)) + 0.5);
         if (pen > need) need = pen;
       }
       need = Math.min(need, 40);
     }
     vs.lift = this.noSmooth ? 0 : need >= vs.lift ? need : vs.lift + (need - vs.lift) * (1 - Math.exp(-dt * 14));
-    const X = v.x;
-    const Y = v.y - vs.lift;
+    const X = v.x + ox;
+    const Y = v.y + oy - vs.lift;
     vs.prevMode = mode;
     vs.prevVy = v.vy;
 
     if (mode === RiderMode.RESCUE) this.drawBalloon(ctx, v, vs, X, Y, J, ca, sa, P);
 
     const ghost = !v.isLocal;
-    const body = ghost ? rgba(mix(P.sil, P.haze, 0.38)) : rgba(P.sil);
+    // ghosts: a touch lighter than the local rider, but never below a minimum contrast with
+    // the snow / haze behind them (fog, dusk on bright snow)
+    const body = ghost ? rgba(this.ghostBody(P)) : rgba(P.sil);
     // neck in world space (scarf anchor)
     const nx = X + (J.n.x * ca - J.n.y * sa) * K;
     const ny = Y + (J.n.x * sa + J.n.y * ca) * K;
@@ -290,7 +364,7 @@ export class RiderRenderer {
     const scarfCol = mix(mix(hex(v.color), P.sil, 0.12 + P.night * 0.2), [255, 255, 255], Math.min(0.7, (boost ? 0.12 + boost * 0.06 : 0) + flare * 0.6));
     const s = this.scarf(v, nx, ny, dt, t);
     this.t = t;
-    this.flow = clamp(Math.hypot(v.vx, v.vy) / 1000, 0, 1.3);
+    this.flow = clamp(Math.hypot(v.vx, v.vy) / 1000 + Math.abs(vs.omega) * 0.1, 0, 1.6);
     this.phase = v.isLocal ? 0 : (v.id.length * 1.7) % 6.28;
 
     // at night a faint cool halo keeps the dark silhouette readable against dark ridges
@@ -309,7 +383,7 @@ export class RiderRenderer {
     if (boost && !ghost) P.glow(X - v.vx * 0.02, Y - 22, 46 + boost * 10, 0.22 + boost * 0.1, hex(v.color));
 
     // scarf goes behind the body
-    this.drawScarf(ctx, s, scarfCol, ghost ? 0.75 : 1, boost + flare * 4, v);
+    this.drawScarf(ctx, s, scarfCol, ghost ? 0.92 : 1, boost + flare * 4, v);
 
     ctx.save();
     ctx.translate(X, Y);
@@ -482,8 +556,17 @@ export class RiderRenderer {
     ctx.save();
     ctx.globalAlpha = alpha;
     if (boost) {
-      ctx.shadowColor = rgba(mix(col, [255, 255, 255], 0.3), 0.9);
-      ctx.shadowBlur = 8 + boost * 5;
+      // glow without shadowBlur: the same ribbon, wider and translucent, underneath
+      ctx.globalAlpha = alpha * 0.28;
+      ctx.strokeStyle = rgba(mix(col, [255, 255, 255], 0.3));
+      ctx.lineWidth = 6 + boost * 1.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(s.px[0], s.py[0]);
+      for (let i = 1; i < SEGMENTS; i++) ctx.lineTo(s.px[i], s.py[i]);
+      ctx.stroke();
+      ctx.globalAlpha = alpha;
     }
     ctx.fillStyle = rgba(col);
     ctx.beginPath();
@@ -639,14 +722,66 @@ export class RiderRenderer {
     }
   }
 
+  /** Ghost body colour with a guaranteed luminance gap to the brightest backdrop (snow / haze). */
+  ghostBody(P) {
+    const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    const bright = Math.max(lum(P.snow), lum(P.haze));
+    let k = 0.3;
+    let c = mix(P.sil, P.haze, k);
+    while (k > 0 && bright - lum(c) < 110) {
+      k -= 0.05;
+      c = mix(P.sil, P.haze, Math.max(0, k));
+    }
+    return c;
+  }
+
+  /** Edge marker for an off-screen rider (screen space). side: 1 = right/ahead, -1 = left/behind. */
+  drawMarker(ctx, v, side, x, y, alpha, gapS, P) {
+    if (alpha <= 0.02) return;
+    const name = (v.name || '').toUpperCase().slice(0, 10);
+    const label = gapS == null ? name : `${name}  ${gapS >= 0 ? '+' : '−'}${Math.abs(gapS).toFixed(1)}s`;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // (font / letter spacing are set once per frame by the renderer before this pass)
+    const tw = ctx.measureText(label).width;
+    const pw = tw + 20;
+    // chevron pointing off screen (with a soft dark backing so it reads on bright snow)
+    ctx.fillStyle = rgba(P.sil, 0.35);
+    ctx.beginPath();
+    ctx.moveTo(x + side * 1.5, y);
+    ctx.lineTo(x - side * 13.5, y - 10.5);
+    ctx.lineTo(x - side * 13.5, y + 10.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = v.color;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - side * 12, y - 9);
+    ctx.lineTo(x - side * 12, y + 9);
+    ctx.closePath();
+    ctx.fill();
+    // pill with the name (and gap)
+    const px = side > 0 ? x - 17 - pw : x + 17;
+    ctx.fillStyle = rgba(P.sil, 0.55);
+    ctx.beginPath();
+    ctx.roundRect(px, y - 10, pw, 20, 10);
+    ctx.fill();
+    ctx.fillStyle = v.color;
+    ctx.beginPath();
+    ctx.arc(px + 8, y, 3, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fillText(label, px + 14, y + 0.5);
+    ctx.restore();
+  }
+
   /** Name tag above a ghost, in screen space. */
   drawTag(ctx, v, sx, sy, alpha, P) {
     if (alpha <= 0.02) return;
     const name = (v.name || '').toUpperCase().slice(0, 14);
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.font = '600 10px system-ui, -apple-system, "Segoe UI", sans-serif';
-    if ('letterSpacing' in ctx) ctx.letterSpacing = '1px';
+    // (font / letter spacing are set once per frame by the renderer before this pass)
     const w = ctx.measureText(name).width + 18;
     const x = Math.round(sx - w / 2);
     const y = Math.round(sy);
@@ -670,6 +805,14 @@ export class RiderRenderer {
     ctx.fill();
     ctx.restore();
   }
+}
+
+/** centre of mass above the board, in skeleton units (≈ hip height) */
+const COM_H = 18;
+
+function smooth(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 const JOINTS = ['f1', 'f2', 'k1', 'k2', 'h', 'n', 'hd', 'e1', 'e2', 'a1', 'a2'];

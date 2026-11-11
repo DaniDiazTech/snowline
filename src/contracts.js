@@ -101,8 +101,9 @@ export const PLAYER_COLORS = Object.freeze([
  * @property {'auto'|'clear'|'snow'|'storm'|'fog'} weather   'auto' = derived from the seed
  * @property {'auto'|'dawn'|'day'|'golden'|'dusk'|'night'} startTime  'auto' = derived from the seed
  * @property {number} bots   0..6 AI riders. Every client simulates them locally from the seed (no network traffic); the host's FinishReports for them are authoritative.
+ * @property {boolean} catchUp  riders far behind the leader get a small speed bonus (RiderInput.assist). Default true.
  */
-export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'auto', startTime: 'auto', bots: 0 });
+export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'auto', startTime: 'auto', bots: 0, catchUp: true });
 
 /* ------------------------------------------------------------------ *
  * WORLD  (src/world/)
@@ -173,6 +174,7 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
 /**
  * @typedef {Object} RiderInput   The whole control scheme is one button.
  * @property {boolean} held       button is down this tick (tap = jump, hold in air = backflip)
+ * @property {number} [assist]   0..1 catch-up strength for riders behind the pack (small cruise-speed bonus); missing = 0
  */
 
 /**
@@ -270,6 +272,8 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
  * @property {SimEventRecord[]} events  local rider's events since the previous frame (spawn particles, shakes…)
  * @property {string} phase       Phase
  * @property {boolean} [cinematic] true on home/lobby screens: slow drifting camera, no HUD-related overlays
+ * @property {Array<{id:string, gapS:number}>} [markers]  off-screen riders worth pointing at (nearest ahead / behind); gapS > 0 = ahead of the local rider
+ * @property {string} [focusId]   spectating: id of a rider in `others` the camera follows instead of `local`
  */
 
 /**

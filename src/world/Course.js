@@ -26,7 +26,7 @@ import { createRandom } from '../math/random.js';
 import { PerlinNoise1D } from '../math/perlin.js';
 import { catmullRomScalar, hermite, hermiteDerivative } from '../math/splines.js';
 import { clamp, lerp, smoothstep, lowerBound } from '../math/utils.js';
-import { GRAVITY, JUMP_VY, RAMP_POP, BODY_CENTER, terminalSpeed } from '../math/physics.js';
+import { GRAVITY, JUMP_VY, rampPop, BODY_CENTER, terminalSpeed } from '../math/physics.js';
 
 /** Course-generation tunables (px unless noted). */
 export const COURSE = Object.freeze({
@@ -64,16 +64,24 @@ export const COURSE = Object.freeze({
   // Pits [width px] and their launch ramps [height px]. Every pit has a scooped ramp on its near
   // lip whose run-up length follows from the lip angle above the approach: L = 2h / tan(angle).
   PIT_NARROW: [80, 120], // crevasse: any jump clears it
-  PIT_MEDIUM: [235, 290], // riding off the ramp at cruise is not enough: jump
-  PIT_WIDE: [330, 400], // gorge: jump from the ramp (or boost speed); + up to 30 px with difficulty
+  PIT_MEDIUM: [220, 270], // riding off the ramp at cruise is not enough: jump
+  PIT_WIDE: [300, 345], // gorge: jump from the ramp (or boost speed); + up to 25 px with difficulty
   RAMP_H_NARROW: [25, 35],
   RAMP_H_MEDIUM: [45, 60],
-  RAMP_H_WIDE: [60, 80],
+  RAMP_H_WIDE: [72, 88],
   RAMP_LIP_DEG: [14, 24], // lip angle above the approach slope
   KICKER_H: [45, 65], // standalone ramps on open slopes
-  LANDING_SLOPE: [0.45, 0.55], // downslope after a pit that receives the jump arc (≈ 24-29°)
-  LANDING_LEN: 800, // px
-  PIT_DOUBLE_PAD: [1000, 1150], // beyond the first pit's landing hill, + the second ramp's run-up
+  LANDING_SLOPE: [0.45, 0.55], // downslope after a pit / kicker that receives the jump arc (≈ 24-29°)
+  LANDING_LEN: 500, // px of steep landing hill…
+  GORGE_LANDING_SLOPE: [0.72, 0.82], // wide gorges: steep landing hill (≈ 36-39°) — big air, doubles at speed
+  GORGE_LANDING_LEN: 650,
+  RUNOUT_SLOPE: 0.1, // …then a gentle run-out that bleeds the landing speed off
+  RUNOUT_LEN: 700,
+  CLEAR_AFTER_AIR: 1500,
+  FINALE_FRAC: 0.08, // the last ~8% of the course is a set-piece finale…
+  FINALE_MIN: 4600, // …but at least this long (px) // px after a big-air landing zone with no obstacle / set piece
+  INRUN_SLOPE: [0.28, 0.34], // approach under a ramp: descends about as fast as the scoop rises
+  PIT_DOUBLE_PAD: [2300, 2500], // room for a boosted landing + 1.2 s at speed, then the second ramp
   PIT_DEPTH: 560, // pit floor below the lower lip
   ROCK_R: [14, 30],
   // Obstacle kinds per biome (weights) and box sizes (px). Boxes are {x (centre), w, h}.
@@ -85,9 +93,9 @@ export const COURSE = Object.freeze({
   },
   LOG_W: [70, 110],
   LOG_H: [18, 24],
-  SNOWMAN_W: [28, 32],
-  SNOWMAN_H: [52, 60],
-  SPIKES_W: [120, 200],
+  SNOWMAN_W: [24, 28],
+  SNOWMAN_H: [34, 42], // a plain, reasonably timed tap clears it (hop apex ≈ 90 px); still taller than wide
+  SPIKES_W: [95, 130], // a plain tap must clear them at 15 m/s with a ≥ 0.18 s timing window
   SPIKES_H: 12,
   CREST_CLEAR: 700, // no rock within this distance after a natural launch point
   LAUNCH_SPEED: 470, // speed used to find natural launch points (crests)
@@ -98,10 +106,10 @@ const BIOMES = ['slopes', 'forest', 'village', 'ridge'];
 
 /** Set-piece weights per biome. */
 const PIECE_WEIGHTS = {
-  slopes: { kicker: 3, obstacles: 2.5, bunting: 2, chasm: 0.8, drop: 1.5, ice: 1 },
-  forest: { obstacles: 3, kicker: 2, bunting: 1.5, drop: 1, campfire: 0.8, chasm: 0.6 },
-  village: { roofs: 4, bunting: 2.5, kicker: 1, campfire: 1, ice: 1 },
-  ridge: { chasm: 2, drop: 2, obstacles: 2.5, kicker: 1.5 },
+  slopes: { kicker: 5, obstacles: 2.5, bunting: 3, chasm: 0.8, drop: 1.5, ice: 1 },
+  forest: { obstacles: 3, kicker: 3.5, bunting: 3.5, drop: 1, campfire: 0.8, chasm: 0.6 },
+  village: { roofs: 3, bunting: 3.5, kicker: 2, campfire: 1, ice: 1 },
+  ridge: { chasm: 2, drop: 2, obstacles: 2.5, kicker: 3, bunting: 1.5 },
 };
 
 /**
@@ -168,12 +176,16 @@ export function generateCourse(seed, settings) {
   };
 
   /* ---------------- 2. layout (set pieces) ---------------- */
+  const finaleStart = finishX - Math.max(COURSE.FINALE_FRAC * length, COURSE.FINALE_MIN);
   const pieces = [];
   const minorSlots = []; // gaps: {x0, x1, d}
   {
-    let x = startX + COURSE.FREE_START_M * PX_PER_M;
-    minorSlots.push({ x0: startX + 600, x1: x - 200, d: 0, safe: true });
-    let prevType = '';
+    // The hazard-free intro gets one kicker: an early, readable first flip.
+    const intro = planPiece(rngLayout, 'kicker', startX + 800, 0);
+    pieces.push(intro);
+    let x = Math.max(startX + COURSE.FREE_START_M * PX_PER_M, intro.x1 + COURSE.CLEAR_AFTER_AIR);
+    minorSlots.push({ x0: intro.x1, x1: x - 200, d: 0, safe: true });
+    let prevType = 'kicker';
     // Pit schedule (progress fractions): first within the first ~30%, the rest spread out.
     const pitCount = COURSE.PITS[set.length] || COURSE.PITS.classic;
     const firstPit = rngLayout.range(0.08, 0.2);
@@ -188,22 +200,73 @@ export function generateCourse(seed, settings) {
         while (pitAt.length && d >= pitAt[0]) pitAt.shift();
       }
       const piece = planPiece(rngLayout, type, x, d);
-      if (piece.x1 > finishX - COURSE.FINISH_CLEAR) break;
+      if (piece.x1 > finaleStart - (piece.bigAir ? COURSE.CLEAR_AFTER_AIR : 600)) break; // the finale starts on time
       pieces.push(piece);
       prevType = piece.type;
-      const gap = rngLayout.range(COURSE.GAP_MIN_M, COURSE.GAP_MAX_M) * PX_PER_M * lerp(1, 0.75, d);
-      const slot = { x0: piece.x1, x1: piece.x1 + gap, d: progressOf(piece.x1) };
+      let gap = rngLayout.range(COURSE.GAP_MIN_M, COURSE.GAP_MAX_M) * PX_PER_M * lerp(1, 0.75, d);
+      if (piece.bigAir) gap = Math.max(gap, COURSE.CLEAR_AFTER_AIR + 300);
+      const slot = { x0: piece.x1, x1: piece.x1 + gap, d: progressOf(piece.x1), clearTo: piece.bigAir ? piece.x1 + COURSE.CLEAR_AFTER_AIR : -Infinity };
       // A roller near the end of the gap: a near-flat shelf that breaks over a rounded
       // crest into a short steep pitch — the rider floats off the crest at cruise speed.
-      const hb = biomeAt(slot.x1 - 900);
+      // Rollers launch real air at speed: the crest sits early in the gap and the rest of the gap
+      // (≥ CLEAR_AFTER_AIR past the pitch) stays free, so the landing never meets a hazard.
+      const hb = biomeAt(slot.x0 + 900);
+      const rollStart = Math.max(slot.x0, slot.clearTo) + 600;
       if (gap > 1600 && rngLayout.chance(COURSE.ROLLER_CHANCE[hb])) {
-        slot.rollShelf = rngLayout.range(220, 380);
-        slot.rollPitch = rngLayout.range(200, 320);
-        slot.rollSteep = rngLayout.range(0.42, 0.52) + (hb === 'ridge' ? 0.06 : 0);
-        slot.rollX = slot.x1 - 450 - slot.rollPitch - rngLayout.range(0, 250); // crest
+        const shelf = rngLayout.range(220, 380);
+        const pitch = rngLayout.range(200, 320);
+        const steep = rngLayout.range(0.42, 0.52) + (hb === 'ridge' ? 0.06 : 0);
+        const crest = rollStart + shelf + rngLayout.range(0, 200);
+        if (crest + pitch + COURSE.CLEAR_AFTER_AIR <= slot.x1) {
+          slot.rollShelf = shelf;
+          slot.rollPitch = pitch;
+          slot.rollSteep = steep;
+          slot.rollX = crest;
+          slot.clearTo = crest + pitch + COURSE.CLEAR_AFTER_AIR;
+        }
       }
       minorSlots.push(slot);
       x = piece.x1 + gap;
+    }
+    // No regular content inside the finale zone.
+    for (const sl of minorSlots) {
+      sl.x1 = Math.min(sl.x1, finaleStart - 200);
+      if (sl.rollX && sl.rollX + sl.rollPitch + COURSE.CLEAR_AFTER_AIR > sl.x1) sl.rollX = 0;
+    }
+    // Finale set piece (seeded): A = bunting run-in → big kicker → landing hill;
+    // B = ramped pit → bunting chain. Nothing in the last FINISH_CLEAR px before the line.
+    const last = pieces[pieces.length - 1];
+    let fx = Math.max(finaleStart, last ? last.x1 + (last.bigAir ? COURSE.CLEAR_AFTER_AIR : 600) : finaleStart);
+    const variant = rngLayout.int(0, 1);
+    const finale = [];
+    const limit = finishX - COURSE.FINISH_CLEAR;
+    const twoLines = (b) => {
+      // the finale run-in / chain is two lines
+      b.spans = b.spans.slice(0, 2);
+      b.x1 = b.x0 + 120 + b.spans.reduce((t, [sp, g]) => t + sp + g, 0) + 450;
+      b.noHazards = true;
+      return b;
+    };
+    if (variant === 0) {
+      const a = twoLines(planPiece(rngLayout, 'bunting', fx, 1));
+      const k = planPiece(rngLayout, 'kicker', a.x1 + 200, 1);
+      k.rampH = rngLayout.range(68, 78);
+      k.rampLen = (2 * k.rampH) / Math.tan(k.lipAngle);
+      k.lipX = k.x0 + 250 + k.rampLen;
+      k.x1 = k.lipX + 1.6 * k.rampH + COURSE.LANDING_LEN + COURSE.RUNOUT_LEN;
+      finale.push(a, k);
+    } else {
+      let c = planPiece(rngLayout, 'chasm', fx, 1);
+      for (let t = 0; t < 8 && c.pitClass !== 'medium'; t++) c = planPiece(rngLayout, 'chasm', fx, 1);
+      c.pits = [c.pits[0]];
+      c.x1 = c.pits[0][1] + c.landLen + COURSE.RUNOUT_LEN;
+      const b = twoLines(planPiece(rngLayout, 'bunting', c.x1 + 200, 1));
+      finale.push(c, b);
+    }
+    for (const fp of finale) {
+      if (fp.x1 > limit) break;
+      fp.finale = true;
+      pieces.push(fp);
     }
   }
 
@@ -266,17 +329,23 @@ export function generateCourse(seed, settings) {
     switch (p.type) {
       case 'kicker': {
         // Smooth run-up, then a landing hill that falls away under the jump arc.
-        flatten(p.lipX - p.rampLen - 250, p.lipX, 160, 0.14, 0.24);
+        flatten(p.lipX - p.rampLen - 250, p.lipX, 160, COURSE.INRUN_SLOPE[0], COURSE.INRUN_SLOPE[1]);
         const ls = p.landSlope;
-        shapeSlope(p.lipX + 1.6 * p.rampH, p.lipX + 1.6 * p.rampH + COURSE.LANDING_LEN, 170, () => ls);
+        const l0 = p.lipX + 1.6 * p.rampH;
+        shapeSlope(l0, l0 + COURSE.LANDING_LEN, 170, () => ls);
+        shapeSlope(l0 + COURSE.LANDING_LEN + 150, l0 + COURSE.LANDING_LEN + COURSE.RUNOUT_LEN, 450, () => COURSE.RUNOUT_SLOPE); // long feather: the run-out must not end in a launch crest
         break;
       }
       case 'chasm': {
         // Smooth approach into the first ramp, then a downslope landing zone after every pit.
-        flatten(p.cx0 - p.rampLen - 320, p.pits[p.pits.length - 1][1] + 700, 160, 0.16, 0.24);
+        // Steep in-run into the ramp (it descends about as fast as the scoop rises, so the rider
+        // reaches the lip at speed), then a downslope landing zone after every pit.
+        flatten(p.cx0 - p.rampLen - 320, p.cx0, 160, COURSE.INRUN_SLOPE[0], COURSE.INRUN_SLOPE[1]);
+        if (p.pits.length > 1) flatten(p.pits[1][0] - p.pits[1][2] - 200, p.pits[1][0], 140, COURSE.INRUN_SLOPE[0], COURSE.INRUN_SLOPE[1]);
         for (const [, px1] of p.pits) {
           const ls = p.landSlope;
-          shapeSlope(px1 - 10, px1 + COURSE.LANDING_LEN, 170, () => ls);
+          shapeSlope(px1 - 10, px1 + p.landLen, 170, () => ls);
+          shapeSlope(px1 + p.landLen + 150, px1 + p.landLen + COURSE.RUNOUT_LEN, 450, () => COURSE.RUNOUT_SLOPE); // long feather: the run-out must not end in a launch crest
         }
         break;
       }
@@ -495,7 +564,7 @@ export function generateCourse(seed, settings) {
       const r = lerp(COURSE.ROCK_R[0], COURSE.ROCK_R[0] + 6, rngFeat.next()) + (COURSE.ROCK_R[1] - COURSE.ROCK_R[0] - 6) * d * rngFeat.next();
       f = { type: FeatureType.ROCK, x, size: Math.round(r), variant: rngFeat.int(0, 5) };
     } else if (kind === 'campfire') f = { type: FeatureType.CAMPFIRE, x, size: 16, variant: rngFeat.int(0, 2) };
-    else if (kind === 'log') f = { type: FeatureType.LOG, x, w: Math.round(R(COURSE.LOG_W)), h: Math.round(R(COURSE.LOG_H)), variant: rngFeat.int(0, 3) };
+    else if (kind === 'log') f = { type: FeatureType.LOG, x, w: Math.round(lerp(COURSE.LOG_W[0], COURSE.LOG_W[1], rngFeat.next() * (0.4 + 0.6 * d))), h: Math.round(R(COURSE.LOG_H)), variant: rngFeat.int(0, 3) };
     else if (kind === 'snowman') f = { type: FeatureType.SNOWMAN, x, w: Math.round(R(COURSE.SNOWMAN_W)), h: Math.round(R(COURSE.SNOWMAN_H)), variant: rngFeat.int(0, 3) };
     else f = { type: FeatureType.SPIKES, x, w: Math.round(lerp(COURSE.SPIKES_W[0], COURSE.SPIKES_W[1], rngFeat.next() * (0.5 + 0.5 * d))), h: COURSE.SPIKES_H, variant: rngFeat.int(0, 3) };
     const half = f.w ? f.w / 2 : f.size;
@@ -520,13 +589,21 @@ export function generateCourse(seed, settings) {
       case 'kicker': {
         features.push({ type: FeatureType.RAMP, x: p.lipX - p.rampLen, x0: p.lipX - p.rampLen, x1: p.lipX + 1.6 * p.rampH, lipX: p.lipX, size: p.rampH, lipAngle: p.lipAngle, variant: rngFeat.int(0, 2) });
         const lipSlope = baseSlopeAt(p.lipX - 1);
-        jumpArcFrom(p.lipX - 2, RAMP_POP, lipSlope, { max: 14 });
+        jumpArcFrom(p.lipX - 2, rampPop(p.rampH), lipSlope, { max: 14 });
         break;
       }
       case 'chasm': {
+        // Narrow crevasses: sometimes a bunting line spans it (grind across instead of jumping).
+        if (p.pits.length === 1 && p.pitClass === 'narrow' && rngFeat.chance(0.5)) {
+          const lx0 = p.cx0 - p.rampLen * 0.5;
+          const lx1 = p.cx1 + 480; // long enough that a ramp-launched rider comes down onto it
+          const g = addGrind(GrindKind.BUNTING, lx0, lx1, rngFeat.range(84, 90) + 0.6 * p.rampH, rngFeat.range(86, 94), rngFeat.range(6, 12));
+          decorFixed.push({ type: 'pole', x: lx0, scale: (baseHeightAt(lx0) - g.y0) / 90, depth: 0, variant: 0 });
+          decorFixed.push({ type: 'pole', x: lx1, scale: (baseHeightAt(lx1) - g.y1) / 90, depth: 0, variant: 0 });
+        }
         // Every pit has a kicker on its near lip.
         for (const [px0, , rl, rh, la] of p.pits) features.push({ type: FeatureType.RAMP, x: px0 - rl, x0: px0 - rl, x1: px0, lipX: px0, size: rh, lipAngle: la, variant: 0 });
-        jumpArcFrom(p.cx0 - 2, RAMP_POP, baseSlopeAt(p.cx0 - 1), { max: 14 });
+        jumpArcFrom(p.cx0 - 2, rampPop(p.rampH), baseSlopeAt(p.cx0 - 1), { max: 14 });
         break;
       }
       case 'obstacles': {
@@ -578,7 +655,15 @@ export function generateCourse(seed, settings) {
               if (minClear >= 52 || g.sag <= 0) break;
               g.sag = Math.max(0, g.sag - (52 - minClear) - 1);
             }
-            if (i === 0 && biomeAt(x0) === 'village' && rngFeat.chance(0.6)) addObstacle('snowman', x0 + 45, d, true);
+            // Some lines are the smart route over a hazard: spikes or a pair of snowmen underneath.
+            if (!p.noHazards && rngFeat.chance(0.35) && x1 - x0 > 300) {
+              const mid = (x0 + x1) / 2;
+              if (rngFeat.chance(0.5)) addObstacle('spikes', mid, d, true);
+              else {
+                addObstacle('snowman', mid - 70, d, true);
+                addObstacle('snowman', mid + 70, d, true);
+              }
+            }
             decorFixed.push({ type: 'pole', x: x0, scale: pole0 / 90, depth: 0, variant: 0 });
             decorFixed.push({ type: 'pole', x: x1, scale: pole1 / 90, depth: 0, variant: 0 });
           }
@@ -620,7 +705,13 @@ export function generateCourse(seed, settings) {
       const two = span > 2000 && rngFeat.chance(0.05 + 0.5 * slot.d);
       const one = rngFeat.chance(0.7 + 0.3 * slot.d);
       const fr = two ? [rngFeat.range(0.4, 0.5), rngFeat.range(0.68, 0.78)] : one ? [rngFeat.range(0.5, 0.68)] : [];
-      for (const t of fr) addObstacle(pickKind(biomeAt(slot.x0 + span * t)), slot.x0 + span * t, slot.d);
+      let lastX = -Infinity;
+      for (const t of fr) {
+        const ox = Math.max(slot.x0 + span * t, slot.clearTo ?? -Infinity, lastX + 450);
+        if (ox >= slot.x1 - 300) continue;
+        const o = addObstacle(pickKind(biomeAt(ox)), ox, slot.d);
+        if (o) lastX = o.x + (o.w ? o.w / 2 : o.size);
+      }
     }
     if (!slot.safe && ++powerCounter % 4 === 0) {
       const kind = rngFeat.chance(0.5) ? PickupKind.FEATHER : PickupKind.MAGNET;
@@ -631,6 +722,8 @@ export function generateCourse(seed, settings) {
   }
 
   // Sort, assign stable ids, freeze.
+  // A short coin arc over every snowman, tracing the tap jump line.
+  for (const f of features.filter((q) => q.type === FeatureType.SNOWMAN)) jumpArcFrom(f.x - speedEst(f.x) * 0.31, 0, null, { max: 6, tStart: 0.18 });
   features.sort((a, b) => a.x - b.x || typeOrder(a.type) - typeOrder(b.type));
   let maxRight = 0; // max(end - x)
   let maxLeft = 0; // max(x - start)
@@ -643,6 +736,16 @@ export function generateCourse(seed, settings) {
     Object.freeze(f);
   });
   const maxFeatureSpan = maxRight;
+  // Flat tables for fast range queries.
+  const fX = new Float64Array(features.length);
+  const fStart = new Float64Array(features.length);
+  const fEnd = new Float64Array(features.length);
+  features.forEach((f, i) => {
+    const [a, b] = extent(f);
+    fX[i] = f.x;
+    fStart[i] = a;
+    fEnd[i] = b;
+  });
   Object.freeze(features);
 
   function grindLineY(f, x) {
@@ -655,6 +758,9 @@ export function generateCourse(seed, settings) {
   const decor = [...decorFixed];
   decor.push({ type: 'startGate', x: startX, scale: 1, depth: 0, variant: 0 });
   decor.push({ type: 'finishArch', x: finishX, scale: 1, depth: 0, variant: 0 });
+  // Distance boards (banner, variant = metres to go) and a lantern-lit final approach.
+  for (const m of [500, 250, 100]) if (finishX - m * PX_PER_M > startX) decor.push({ type: 'banner', x: finishX - m * PX_PER_M, scale: 1, depth: 0.3, variant: m });
+  for (let lx = finishX - 2200; lx < finishX - 60; lx += 240) decor.push({ type: 'lantern', x: lx, scale: 1, depth: 0.35, variant: 2 });
   const nearChasm = (x, pad) => chasms.some((c) => x > c.x0 - pad && x < c.x1 + pad);
   const nearHazard = (x, pad) => {
     const lo = lowerBound(features, x - pad - maxFeatureSpan, (f) => f.x);
@@ -698,14 +804,22 @@ export function generateCourse(seed, settings) {
 
   /* ---------------- queries ---------------- */
   function featuresIn(x0, x1) {
-    const out = [];
-    let i = lowerBound(features, x0 - maxRight, (f) => f.x);
-    for (; i < features.length; i++) {
-      const f = features[i];
-      if (f.x > x1 + maxLeft) break;
-      const [a, b] = extent(f);
-      if (b >= x0 && a <= x1) out.push(f);
+    return featuresInto(x0, x1, []);
+  }
+  /** Like featuresIn, filling (and returning) a caller-owned array: no allocation. */
+  function featuresInto(x0, x1, out) {
+    out.length = 0;
+    // binary search on the precomputed x table (no closures, no temporary arrays)
+    const v = x0 - maxRight;
+    let lo = 0;
+    let hi = fX.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (fX[mid] < v) lo = mid + 1;
+      else hi = mid;
     }
+    const lim = x1 + maxLeft;
+    for (let i = lo; i < fX.length && fX[i] <= lim; i++) if (fEnd[i] >= x0 && fStart[i] <= x1) out.push(features[i]);
     return out;
   }
   function decorIn(x0, x1) {
@@ -737,6 +851,7 @@ export function generateCourse(seed, settings) {
     _chasms: Object.freeze(chasms),
     _biomeAt: biomeAt,
     _extent: extent,
+    _featuresInto: featuresInto,
   });
 }
 
@@ -789,7 +904,8 @@ function planPiece(rng, type, x, d) {
       p.rampLen = (2 * p.rampH) / Math.tan(p.lipAngle);
       p.lipX = x + 250 + p.rampLen;
       p.landSlope = lerp(COURSE.LANDING_SLOPE[0], COURSE.LANDING_SLOPE[1], rng.next());
-      p.x1 = p.lipX + 1150;
+      p.x1 = p.lipX + 1.6 * p.rampH + COURSE.LANDING_LEN + COURSE.RUNOUT_LEN;
+      p.bigAir = true;
       break;
     }
     case 'chasm': {
@@ -797,7 +913,7 @@ function planPiece(rng, type, x, d) {
       const r = rng.next();
       const cls = r < 0.3 ? 'narrow' : r < 0.72 ? 'medium' : 'wide';
       const R = (a) => lerp(a[0], a[1], rng.next());
-      const width = cls === 'narrow' ? R(COURSE.PIT_NARROW) : cls === 'medium' ? R(COURSE.PIT_MEDIUM) : R(COURSE.PIT_WIDE) + 30 * d * rng.next();
+      const width = cls === 'narrow' ? R(COURSE.PIT_NARROW) : cls === 'medium' ? R(COURSE.PIT_MEDIUM) : R(COURSE.PIT_WIDE) + 25 * d * rng.next();
       p.pitClass = cls;
       // Scooped ramp on the near lip of every pit: [x0, x1, rampLen, rampH, lipAngle].
       const ramp = (hRange) => {
@@ -808,7 +924,8 @@ function planPiece(rng, type, x, d) {
       const [rl, rh, ra] = ramp(cls === 'narrow' ? COURSE.RAMP_H_NARROW : cls === 'medium' ? COURSE.RAMP_H_MEDIUM : COURSE.RAMP_H_WIDE);
       p.rampLen = rl;
       p.rampH = rh;
-      p.landSlope = R(COURSE.LANDING_SLOPE);
+      p.landSlope = R(cls === 'wide' ? COURSE.GORGE_LANDING_SLOPE : COURSE.LANDING_SLOPE);
+      p.landLen = cls === 'wide' ? COURSE.GORGE_LANDING_LEN : COURSE.LANDING_LEN;
       p.cx0 = x + 320 + rl;
       p.cx1 = p.cx0 + width;
       p.pits = [[p.cx0, p.cx1, rl, rh, ra]];
@@ -817,12 +934,13 @@ function planPiece(rng, type, x, d) {
         const [rl2, rh2, ra2] = ramp(COURSE.RAMP_H_NARROW);
         p.pits.push([a, a + R(COURSE.PIT_NARROW) + 20 * rng.next(), rl2, rh2, ra2]);
       }
-      p.x1 = p.pits[p.pits.length - 1][1] + 900;
+      p.x1 = p.pits[p.pits.length - 1][1] + p.landLen + COURSE.RUNOUT_LEN;
+      p.bigAir = true;
       break;
     }
     case 'obstacles':
       p.count = Math.min(3, 1 + Math.floor(rng.next() * (1.4 + 2 * d)));
-      p.spacing = rng.range(340, 480);
+      p.spacing = rng.range(360, 480) - 80 * d; // rows tighten along the course
       p.x1 = x + 200 + p.count * p.spacing + 250;
       break;
     case 'campfire':
@@ -831,16 +949,17 @@ function planPiece(rng, type, x, d) {
     case 'bunting':
     case 'roofs': {
       const isRoof = type === 'roofs';
-      const count = isRoof ? rng.int(2, 4) : rng.int(2, 3);
+      const count = isRoof ? rng.int(2, 4) : rng.int(2, 4);
       p.spans = [];
       let len = 120;
       for (let i = 0; i < count; i++) {
-        const span = isRoof ? rng.range(150, 230) : rng.range(260, 470);
+        const span = isRoof ? rng.range(150, 230) : rng.range(260, 560);
         const gap = isRoof ? rng.range(90, 170) : rng.range(110, 200);
         p.spans.push([span, gap]);
         len += span + gap;
       }
       p.x1 = x + len + 450;
+      p.bigAir = true; // riding off a line at speed is real air: keep the gap after it clear
       break;
     }
     case 'ice':
@@ -852,6 +971,7 @@ function planPiece(rng, type, x, d) {
       p.steep = rng.range(0.5, 0.68);
       p.dropX = x + 200 + p.lipLen;
       p.rise = rng.chance(0.5);
+      p.bigAir = true;
       p.x1 = p.dropX + p.dropLen + 950;
       break;
   }

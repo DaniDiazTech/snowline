@@ -56,6 +56,7 @@ export class FameModal {
     void this.el.offsetWidth;
     this.el.classList.add('is-open');
     this.closeBtn.focus({ preventScroll: true });
+    this.onToggle?.(true);
   }
 
   close() {
@@ -66,6 +67,7 @@ export class FameModal {
       if (!this.open) this.el.hidden = true;
     }, 320);
     this.returnFocus?.focus?.({ preventScroll: true });
+    this.onToggle?.(false);
   }
 
   setRecords(records) {

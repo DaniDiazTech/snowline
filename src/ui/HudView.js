@@ -12,19 +12,51 @@ import { formatTime, ordinalSuffix } from './format.js';
 
 const RING_C = 2 * Math.PI * 15; // ring circumference (r = 15)
 const BOOST_NAMES = ['', 'Boost', 'Super boost', 'Ultra boost'];
+/** Speedometer: km/h at the right end of the arc, and the arc's sweep (degrees, centred on 12 o'clock). */
+const SPEEDO_MAX = 150;
+const SPEEDO_SWEEP = 180;
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** Small SVG builder for the HUD widgets (static markup, no user data). */
+function svg(tag, attrs = {}, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  el.append(...kids);
+  return el;
+}
+
+/** Wavy ribbon outline for the scarf meter (viewBox 0 0 120 14): a scarf blowing in the wind. */
+const RIBBON_PATH = 'M2 4 C22 1 38 6 60 3.5 C82 1 98 5 118 2.5 L114 7 L118 11.5 C98 14 82 10 60 12.5 C38 15 22 10 2 12 Z';
+let ribbonSeq = 0;
 
 export class HudView {
   constructor() {
     this.cache = {};
     this.markers = new Map();
+    // Viewport size, cached: reading innerWidth/innerHeight every frame can force a layout.
+    this.vw = innerWidth;
+    this.vh = innerHeight;
+    addEventListener('resize', () => {
+      this.vw = innerWidth;
+      this.vh = innerHeight;
+    });
     this.ringMax = { hover: 0, magnet: 0 };
 
-    // top-left: time + position
+    // top-left: one plaque with the race time and the position
     this.timeEl = h('span', { class: 'hud-time', 'data-testid': 'hud-timer', 'aria-label': 'Race time' }, '0:00.00');
     this.posEl = h('b', {}, '–');
     this.totalEl = h('span', {}, '/–');
     this.posWrap = h('span', { class: 'hud-pos', 'data-testid': 'hud-position', 'aria-label': 'Position' }, this.posEl, this.totalEl);
-    const tl = h('div', { class: 'hud__tl' }, this.timeEl, this.posWrap);
+    // under the plaque: nearest rider ahead / behind, in seconds
+    this.gapEl = h('span', { class: 'hud-gaps', 'data-testid': 'hud-gaps', 'aria-hidden': 'true' });
+    this.plaque = h(
+      'div',
+      { class: 'plaque' },
+      h('span', { class: 'plaque__cell' }, icon(ICONS.clock, 'icon plaque__icon'), this.timeEl),
+      h('span', { class: 'plaque__sep', 'aria-hidden': 'true' }),
+      h('span', { class: 'plaque__cell' }, icon(ICONS.podium, 'icon plaque__icon'), this.posWrap)
+    );
+    const tl = h('div', { class: 'hud__tl' }, this.plaque, this.gapEl);
 
     // top-centre: progress track + combo readout
     this.fill = h('span', { class: 'track__fill' });
@@ -35,7 +67,7 @@ export class HudView {
       h('span', { class: 'track__line' }),
       this.fill,
       this.markerLayer,
-      h('span', { class: 'track__flag' }, icon(ICONS.flag, 'icon icon--xs'))
+      h('span', { class: 'track__flag' }, icon(ICONS.finish, 'icon'))
     );
     this.comboTricks = h('span', { class: 'combo__tricks' });
     this.comboMult = h('span', { class: 'combo__mult' });
@@ -44,15 +76,32 @@ export class HudView {
     this.comboAnchor = h('div', { class: 'combo-anchor' }, this.combo);
     const top = h('div', { class: 'hud__top' }, this.track, this.comboAnchor);
 
-    // bottom-left: speed, scarf gauge, power-ups
+    // bottom-left: speedometer (a dot rides a segmented arc), the scarf ribbon, power-up rings
     this.speedEl = h('b', {}, '0');
-    const speed = h('span', { class: 'hud-speed', 'data-testid': 'hud-speed' }, this.speedEl, h('small', {}, 'km/h'));
-    this.gaugeFill = h('span', { class: 'gauge__fill' });
+    this.speedDot = svg('g', { class: 'speedo__dot' }, svg('circle', { cx: '50', cy: '9', r: '4.2' }));
+    const arc = 'M9 50 A41 41 0 0 1 91 50';
+    const speedoSvg = svg('svg', { class: 'speedo__svg', viewBox: '0 0 100 56', 'aria-hidden': 'true' }, svg('path', { class: 'speedo__track', d: arc }), svg('path', { class: 'speedo__ticks', d: arc }), this.speedDot);
+    this.speedo = h('span', { class: 'speedo', 'data-level': '0' }, speedoSvg, h('span', { class: 'hud-speed', 'data-testid': 'hud-speed' }, this.speedEl, h('small', {}, 'km/h')));
+    // scarf ribbon: a fill (scaleX) clipped to a wavy scarf outline, and a thin boost-time line under it
+    const clipId = `ribbon-clip-${++ribbonSeq}`;
+    this.gaugeFill = svg('rect', { class: 'gauge__fill', x: '0', y: '0', width: '120', height: '14' });
     this.gaugeBoost = h('span', { class: 'gauge__boost' });
-    this.gauge = h('span', { class: 'gauge', 'data-testid': 'hud-scarf', role: 'meter', 'aria-label': 'Scarf', 'aria-valuemin': '0', 'aria-valuemax': '100' }, this.gaugeFill, this.gaugeBoost);
+    const ribbon = svg(
+      'svg',
+      { class: 'ribbon', viewBox: '0 0 120 14', preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+      svg('defs', {}, svg('clipPath', { id: clipId }, svg('path', { d: RIBBON_PATH }))),
+      svg('g', { 'clip-path': `url(#${clipId})` }, svg('rect', { class: 'ribbon__bg', x: '0', y: '0', width: '120', height: '14' }), this.gaugeFill),
+      svg('path', { class: 'ribbon__edge', d: RIBBON_PATH })
+    );
+    this.gauge = h('span', { class: 'gauge', 'data-testid': 'hud-scarf', role: 'meter', 'aria-label': 'Scarf', 'aria-valuemin': '0', 'aria-valuemax': '100' }, ribbon, this.gaugeBoost);
     this.boostTag = h('span', { class: 'gauge__tag', 'data-testid': 'hud-boost' });
     this.rings = { hover: this._ring('hover', ICONS.feather, 'Feather'), magnet: this._ring('magnet', ICONS.magnet, 'Magnet') };
-    const bl = h('div', { class: 'hud__bl' }, h('div', { class: 'hud__meter' }, speed, h('span', { class: 'gauge-wrap' }, this.gauge, this.boostTag)), h('div', { class: 'rings' }, this.rings.hover.el, this.rings.magnet.el));
+    const bl = h(
+      'div',
+      { class: 'hud__bl' },
+      this.speedo,
+      h('div', { class: 'hud__meter' }, h('span', { class: 'gauge-label' }, 'Scarf', this.boostTag), this.gauge, h('div', { class: 'rings' }, this.rings.hover.el, this.rings.magnet.el))
+    );
 
     this.toastLayer = h('div', { class: 'trick-layer', 'aria-hidden': 'true' });
     this.announceEl = h('div', { class: 'announce', role: 'status', 'aria-live': 'polite', 'data-testid': 'announce' });
@@ -66,8 +115,16 @@ export class HudView {
       h('div', { class: 'glass finished__card' }, h('p', { class: 'eyebrow' }, 'Finished'), this.finishedPlace, this.finishedTime, h('p', { class: 'waiting' }, h('span', { class: 'waiting__text' }, 'Waiting for the others'), h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))))
     );
 
+    // status chips under the progress bar: tailwind (catch-up), race closing, watching (spectating)
+    this.tailwindEl = h('span', { class: 'status-chip status-chip--wind', 'data-testid': 'hud-tailwind', hidden: true }, icon(ICONS.wind, 'icon icon--sm'), 'Tailwind');
+    this.closingEl = h('span', { class: 'status-chip status-chip--closing', 'data-testid': 'hud-closing', hidden: true }, icon(ICONS.clock, 'icon icon--sm'), h('span', {}));
+    this.watchEl = h('span', { class: 'status-chip status-chip--watch', 'data-testid': 'hud-watching', hidden: true }, icon(ICONS.eye, 'icon icon--sm'), h('span', {}), h('small', {}, 'Tap to switch'));
+    this.statusEl = h('div', { class: 'hud-status' }, this.tailwindEl, this.closingEl, this.watchEl);
+    // announcements get their own row in the top stack, so they never sit on trick toasts or the boost banner
+    top.append(this.statusEl, this.announceEl);
+
     this.hud = h('div', { class: 'hud', 'data-testid': 'hud' }, tl, top, bl);
-    this.el = h('section', { class: 'screen screen--race', 'data-screen': 'race', 'aria-label': 'Race', hidden: true }, this.hud, this.toastLayer, this.announceEl, this.countdownEl, this.finishedEl);
+    this.el = h('section', { class: 'screen screen--race', 'data-screen': 'race', 'aria-label': 'Race', hidden: true }, this.hud, this.toastLayer, this.countdownEl, this.finishedEl);
   }
 
   /** Clears per-race state (called when a race screen is entered fresh). */
@@ -75,11 +132,18 @@ export class HudView {
     this.cache = { cd: this.cache.cd };
     this.ringMax = { hover: 0, magnet: 0 };
     for (const m of this.markers.values()) m.el.remove();
+    this.comboTricks.replaceChildren();
     this.markers.clear();
     this.toastLayer.replaceChildren();
     this.announceEl.replaceChildren();
     this.finishedEl.hidden = true;
+    this.finishedEl.classList.remove('is-compact');
     this.hud.classList.remove('is-finished');
+    this.cache.gaps = '';
+    this.gapEl.textContent = '';
+    this.tailwindEl.hidden = true;
+    this.closingEl.hidden = true;
+    this.watchEl.hidden = true;
     this.combo.classList.remove('is-on', 'pop');
     // (the countdown is left alone: Game may call setCountdown(3) just before show('race'))
     for (const r of Object.values(this.rings)) r.el.classList.remove('is-on');
@@ -114,8 +178,14 @@ export class HudView {
     const racers = hud.racers || [];
     if (racers.length || this.markers.size) this._markers(racers);
 
-    // speed
-    setText(this.speedEl, Math.max(0, Math.round((hud.speedMps || 0) * 3.6)));
+    // speed: number + the dot on the arc (rotation only, in half-degree steps)
+    const kmh = Math.max(0, Math.round((hud.speedMps || 0) * 3.6));
+    setText(this.speedEl, kmh);
+    const deg = Math.round((Math.min(kmh, SPEEDO_MAX) / SPEEDO_MAX - 0.5) * SPEEDO_SWEEP * 2) / 2;
+    if (c.deg !== deg) {
+      c.deg = deg;
+      this.speedDot.style.transform = `rotate(${deg}deg)`;
+    }
 
     // scarf gauge
     const scarf = Math.round(clamp01(hud.scarf) * 200);
@@ -129,6 +199,7 @@ export class HudView {
       if (level > (c.level || 0)) replay(this.gauge, 'is-surge');
       c.level = level;
       this.gauge.dataset.level = String(level);
+      this.speedo.dataset.level = String(level);
       this.boostTag.dataset.level = String(level);
       setText(this.boostTag, BOOST_NAMES[level]);
     }
@@ -150,6 +221,47 @@ export class HudView {
     this._updateRing('magnet', hud.magnetT);
 
     this._combo(hud.combo);
+
+    // nearest riders ahead / behind
+    const g = hud.gaps;
+    const fmtGap = (x) => `${x.name} ${Math.abs(x.gapS) < 10 ? Math.abs(x.gapS).toFixed(1) : Math.round(Math.abs(x.gapS))} s`;
+    const gapText = g ? [g.ahead ? `▲ ${fmtGap(g.ahead)}` : '', g.behind ? `▼ ${fmtGap(g.behind)}` : ''].filter(Boolean).join(' · ') : '';
+    if (c.gaps !== gapText) {
+      c.gaps = gapText;
+      this.gapEl.textContent = gapText;
+    }
+    const wind = !!hud.tailwind;
+    if (c.wind !== wind) {
+      c.wind = wind;
+      this.tailwindEl.hidden = !wind;
+    }
+  }
+
+  /** "Race closes in 0:24" while a race is closing; null hides it. */
+  setClosing(msLeft) {
+    const text = msLeft === null || msLeft === undefined ? '' : `Race closes in ${formatClock(msLeft)}`;
+    if (this.cache.closing === text) return;
+    this.cache.closing = text;
+    this.closingEl.hidden = !text;
+    this.closingEl.lastChild.textContent = text;
+  }
+
+  /** Spectating after the finish: {name, place} or null. The finish card shrinks to a corner chip. */
+  setWatching(info) {
+    const text = info ? `Watching ${info.name}${info.place ? ` · ${ordinal(info.place)}` : ''}` : '';
+    if (this.cache.watch === text) return;
+    this.cache.watch = text;
+    this.watchEl.hidden = !text;
+    this.watchEl.children[1].textContent = text;
+    if (text) this.finishedEl.classList.add('is-compact');
+  }
+
+  /** Short reason label next to the rider after a crash (uses the trick-toast anchor). */
+  crashLabel(text) {
+    const el = h('div', { class: 'trick trick--crash', 'data-testid': 'crash-label' }, h('span', { class: 'trick__label' }, text));
+    for (const t of this.toastLayer.children) t.style.setProperty('--lift', `${(parseFloat(t.style.getPropertyValue('--lift')) || 0) + 1}`);
+    this.toastLayer.append(el);
+    setTimeout(() => el.remove(), 1250);
   }
 
   _markers(racers) {
@@ -236,7 +348,12 @@ export class HudView {
       return;
     }
     const shown = tricks.length > 3 ? ['…', ...tricks.slice(-3)] : tricks;
-    this.comboTricks.textContent = shown.join(' · ');
+    const chips = this.comboTricks.children;
+    while (chips.length > shown.length) this.comboTricks.lastChild.remove();
+    shown.forEach((t, i) => {
+      if (!chips[i]) this.comboTricks.append(h('span', { class: 'trick-chip' }));
+      if (chips[i].textContent !== t) chips[i].textContent = t;
+    });
     this.comboMult.textContent = combo.mult > 1 ? `×${combo.mult}` : '';
     this.comboPts.textContent = String(combo.points | 0);
     this.combo.classList.add('is-on');
@@ -249,18 +366,25 @@ export class HudView {
     if (x === null || x === undefined) {
       st.left = '';
       st.top = '';
+      st.transform = '';
+      this._anchor = '';
       return;
     }
     // keep a little above the rider and inside the viewport
-    const px = Math.max(90, Math.min(innerWidth - 90, x));
+    const px = Math.max(90, Math.min(this.vw - 90, x));
     // Toasts grow upward from this point. When the rider is high on screen (big air, short phones) the
     // anchor drops far enough below the rider that the toast never sits on top of it.
-    const top = innerHeight < 500 ? 96 : 140;
-    const py = Math.min(innerHeight - 60, y - 70 >= top ? y - 70 : Math.max(top, y + 104));
-    const l = `${Math.round(px)}px`;
-    const t = `${Math.round(py)}px`;
-    if (st.left !== l) st.left = l;
-    if (st.top !== t) st.top = t;
+    const top = this.vh < 500 ? 150 : 190; // below the top stack (track, combo, status chips, announcements)
+    const py = Math.min(this.vh - 60, y - 70 >= top ? y - 70 : Math.max(top, y + 104));
+    // A transform moves the layer on the compositor: no layout per frame.
+    const tf = `translate3d(${Math.round(px)}px,${Math.round(py)}px,0)`;
+    if (this._anchor === tf) return;
+    if (!this._anchor) {
+      st.left = '0px';
+      st.top = '0px';
+    }
+    this._anchor = tf;
+    st.transform = tf;
   }
 
   /* ---------------- events ---------------- */
@@ -335,3 +459,8 @@ export class HudView {
 }
 
 const clamp01 = (v) => (v > 1 ? 1 : v > 0 ? v : 0);
+const ordinal = (n) => `${n}${ordinalSuffix(n)}`;
+const formatClock = (ms) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};

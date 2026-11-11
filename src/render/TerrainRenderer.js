@@ -161,7 +161,8 @@ export class TerrainRenderer {
     ctx.clip();
     // gradient columns following the surface
     const depth = clamp(520 * cam.scale, 220, 900);
-    const colW = 10;
+    const d = L.dpr || 1;
+    const colW = this.colW || 10;
     let i = 0;
     for (let x = Math.max(-10, sx[0]); x < Math.min(L.w + 10, sx[n - 1]); x += colW) {
       while (i < n - 2 && sx[i + 1] < x) i++;
@@ -172,6 +173,7 @@ export class TerrainRenderer {
       if (sy[i + 1] < top && !pit[i + 1]) top = sy[i + 1];
       ctx.drawImage(this.grad, 0, 0, 1, GRAD_H, x, top - 2, colW + 0.6, depth);
     }
+    void d;
     this.drawSurfaceDetail(ctx, atm, cam, L);
     ctx.restore();
   }

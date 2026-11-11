@@ -28,11 +28,11 @@ import { surfaceY } from './TerrainRenderer.js';
 export const RIDER_FRAC_CRUISE = 0.065;
 export const RIDER_FRAC_FAST = 0.045;
 export const MIN_RIDER_PX = 26;
-export const LEAD_S = 0.9;
+export const LEAD_S = 1.1;
 const CRUISE_SPEED = 500;
 /** height of the rescue balloon + rope above the rider's board, world px */
 const BALLOON_H = 150; // px/s (≈ 21 m/s)
-const TOP_SPEED = 760; // px/s (≈ 31-32 m/s boosted)
+const TOP_SPEED = 1000; // px/s (≈ 42 m/s, the soft terminal)
 
 export class Camera {
   constructor() {
@@ -74,10 +74,18 @@ export class Camera {
 
   /** Short zoom-out pulse (boost hit): rises instantly, eases out over ~0.25 s, adds a little lead. */
   kick(amount) {
+    if (this.reduced) return;
     this.kickTarget = Math.max(this.kickTarget || 0, amount);
   }
 
+  /** Landing settle: the frame dips down by `px` (≤ 6) and recovers, critically damped. */
+  dip(px) {
+    if (this.reduced) return;
+    this.dipTarget = Math.max(this.dipTarget || 0, Math.min(6, px));
+  }
+
   addShake(amount) {
+    if (this.reduced) return;
     this.shakeAmp = Math.min(14, Math.max(this.shakeAmp, amount));
   }
 
@@ -158,6 +166,7 @@ export class Camera {
       const big = smoothstep(80, 600, air);
       const frac = lerp(RIDER_FRAC_CRUISE, RIDER_FRAC_FAST, Math.max(fast, big));
       scaleT = this.sizeScale(frac);
+      if (big > 0.05) wS = 1.7; // weighty: big airs zoom out slowly
       // lead time first: cap the scale so ≥ LEAD_S s of ground ahead is on screen (the rider sits at ax)
       scaleT = Math.min(scaleT, (W * (1 - ax)) / (LEAD_S * Math.max(speed, 1)));
       tx = rider.x;
@@ -168,9 +177,10 @@ export class Camera {
       // keep the rider inside a safe vertical band (HUD top / bottom)
       const top = H * 0.26;
       const bottom = H * 0.74;
-      const ry = (rider.y - ty) * curScale + H * ay;
-      if (ry < top) ty -= (top - ry) / curScale;
-      if (ry > bottom) ty += (ry - bottom) / curScale;
+      const cs = curScale * this.debugZoom; // (debug close-ups magnify the frame too)
+      const ry = (rider.y - ty) * cs + H * ay;
+      if (ry < top) ty -= (top - ry) / cs;
+      if (ry > bottom) ty += (ry - bottom) / cs;
     }
 
     if (first) {
@@ -184,10 +194,13 @@ export class Camera {
     } else {
       // x: carried with the rider's own displacement (no lag at speed), residual eased;
       // a teleport (respawn) is not carried, so it eases instead of snapping
+      // a different subject (spectating after the finish): glide across over ~0.6 s
+      if (rider.id !== this.prevId) this.switchT = this.prevId === undefined ? 0 : 0.6;
+      this.switchT = Math.max(0, (this.switchT || 0) - dt);
       const moved = rider.x - this.prevRiderX;
-      if (Math.abs(moved) < 200) this.x += moved;
+      if (Math.abs(moved) < 200 && this.switchT <= 0) this.x += moved;
       const gapX = Math.abs(tx - this.x);
-      this.x = damp(this.x, tx, mode === 'race' ? (gapX > 600 ? 4 : 12) : 1.5, dt);
+      this.x = damp(this.x, tx, this.switchT > 0 ? 6 : mode === 'race' ? (gapX > 600 ? 4 : 12) : 1.5, dt);
       // y: rides along with the (spatially smooth) framing target, residual on a critically damped spring
       if (mode === 'race' && this.prevMode === 'race' && Math.abs(ty - this.prevTy) < 200) this.y += ty - this.prevTy;
       [this.y, this.vy] = spring(this.y, this.vy, ty, wY, dt);
@@ -207,7 +220,10 @@ export class Camera {
       if (topS < H * 0.24) this.y -= (H * 0.24 - topS) / sc;
       else if (botS > H * 0.75) this.y += (botS - H * 0.75) / sc;
     }
+    this.dipTarget = (this.dipTarget || 0) * Math.exp(-dt / 0.1);
+    [this.dipAmt, this.dv] = spring(this.dipAmt || 0, this.dv || 0, this.dipTarget, 15, dt);
     this.prevRiderX = rider.x;
+    this.prevId = rider.id;
     this.prevTy = ty;
     this.prevMode = mode;
     this.zoom = this.targetScale / this.baseScale;
@@ -215,6 +231,8 @@ export class Camera {
     this.scale = this.targetScale * (1 - kick) * this.debugZoom;
     // the pulse also leans the frame forward a touch (rider drifts left)
     this.anchorX = this.anchorBase - kick * W * 0.6;
+    // the landing dip moves the world down a few px (anchor), then settles back
+    this.anchorYDrawn = this.anchorY + (this.dipAmt || 0);
 
     // Shake: small deterministic wobble decaying quickly.
     this.shakeAmp = damp(this.shakeAmp, 0, 7, dt);
@@ -236,7 +254,7 @@ export class Camera {
   }
 
   sy(y) {
-    return (y - this.y) * this.scale + this.anchorY + this.shakeY;
+    return (y - this.y) * this.scale + (this.anchorYDrawn ?? this.anchorY) + this.shakeY;
   }
 
   worldToScreen(x, y) {
@@ -249,13 +267,13 @@ export class Camera {
   }
 
   worldY(sy) {
-    return (sy - this.anchorY - this.shakeY) / this.scale + this.y;
+    return (sy - (this.anchorYDrawn ?? this.anchorY) - this.shakeY) / this.scale + this.y;
   }
 
   /** Applies the world transform to a 2D context (on top of the pixel-density base transform). */
   apply(ctx, dpr) {
     const s = this.scale * dpr;
-    ctx.setTransform(s, 0, 0, s, (this.anchorX + this.shakeX - this.x * this.scale) * dpr, (this.anchorY + this.shakeY - this.y * this.scale) * dpr);
+    ctx.setTransform(s, 0, 0, s, (this.anchorX + this.shakeX - this.x * this.scale) * dpr, ((this.anchorYDrawn ?? this.anchorY) + this.shakeY - this.y * this.scale) * dpr);
   }
 }
 

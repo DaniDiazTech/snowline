@@ -10,6 +10,7 @@
  *   near=<type>   POSE at the nth (nth=) feature/decor of a type (rock, chasm, bunting, roof, ice, campfire, hut, windmill…), offset dx=
  *   mode=land&lt=<ms after touchdown>&tilt=<deg>&impact=&sketchy=1   scripted landing
  *   mode=crashslide&ct=<ms after crash>                                 scripted sliding crash + get-up
+ *   mode=flip&ramp=<n>&ft=<ms after take-off>|ftl=<ms vs touchdown>        scripted inertial backflip off a ramp
  *   mode=rescue&ru=<ms after lift start (0..3000, >3000 = set down)>   scripted pit rescue (near=chasm)
  *   x=<world x>   POSE mode: put the local rider at x (instead of simulating)
  *   mode=air|grind|ground|crashed|idle|finished   pose mode (with x)
@@ -18,7 +19,10 @@
  *   crouch= scarf= angle=     pose overrides (angle in degrees)
  *   boost=0..3 shield=1 hover=1
  *   event=land|crash|smash|pickup|boost|jump|finish|combo (level=1..3 for boost; evframes=k frames before the end)   fire one effect shortly before the frame
+ *   scen=flip&ramp=<i>&hold=<ms>|scen=tap|scen=grind&line=<i>  &at=<jump|land|grind|rescue|trick>:<ms>[:nth]
+ *                 (sim mode, frozen) scripted real-sim scenario captured at an exact offset from a sim event
  *   pit=<n>&warm=<ms>  (sim mode) drop the local rider into the nth pit at the start of the frozen window
+ *   spread=<px> markers=1 focus=<ghost id e.g. g1>   pack markers / spectate tests
  *   ghosts=<n>    number of other riders (bots)
  *   freeze=1      render a deterministic warm-up, then stop (for screenshots)
  *   rate=<k>      live playback speed multiplier
@@ -26,6 +30,8 @@
  *   mock=1        force the mock course/rider
  *   perf=1        frame-time overlay (also exposed as window.__perf)
  *   camzoom=<k>  extra camera magnification (close-ups of the rider)
+ *   reduced=1     calm mode (renderer.setReducedEffects)
+ *   quality=auto|high|medium|low   renderer quality (frozen shots default to high)
  *   dpr=<n>       pixel density (default devicePixelRatio, max 2)
  */
 import { Renderer } from '../src/render/Renderer.js';
@@ -146,7 +152,10 @@ async function main() {
   const poseView = (x, i, timeMs) => {
     const mode = Q.get('mode') || 'ground';
     const speed = num('speed', 500);
-    const off = i * -95;
+    // spread=<px>: ghosts alternate far ahead / behind (pack markers); default: a tight pack behind
+    let off = Q.has('spread') ? (i % 2 ? 1 : -1) * Math.ceil(i / 2) * num('spread', 900) : i * -num('slot', 95);
+    // drift=<px/s>: ghosts move relative to the rider (ends at their nominal offset at t) → overtakes
+    if (i > 0 && Q.has('drift')) off += (num('drift', 0) * (timeMs - targetMs)) / 1000;
     const px = x + off;
     const slope = course.slopeAt(px);
     const ang = Math.atan(slope);
@@ -196,20 +205,80 @@ async function main() {
 
   // ---- scripted sequences (pose mode): landing / sliding crash / pit rescue ----
   // rel = ms relative to the key moment (touchdown, crash, lift start)
-  const SEQ = ['land', 'crashslide', 'rescue'];
+  const SEQ = ['land', 'crashslide', 'rescue', 'flip'];
   const seqMode = SEQ.includes(Q.get('mode')) ? Q.get('mode') : null;
-  const seqRel = () => num(seqMode === 'land' ? 'lt' : seqMode === 'crashslide' ? 'ct' : 'ru', 0);
+  // flip: ft = ms after take-off, or ftl = ms relative to touchdown
+  const seqRel = () => (seqMode === 'flip' ? (Q.has('ftl') ? flipPlan().T * 1000 + num('ftl', 0) : num('ft', 0)) : num(seqMode === 'land' ? 'lt' : seqMode === 'crashslide' ? 'ct' : 'ru', 0));
   let seqChasm = null;
   if (seqMode === 'rescue') {
     const x = num('x', course.startX + 500);
     seqChasm = course.features.filter((f) => f.type === FeatureType.CHASM).sort((a, b) => Math.abs(a.x0 - x) - Math.abs(b.x0 - x))[0];
   }
+  // ---- mock inertial backflip off a pit ramp: ω ramps 0→6.6 rad/s over 0.35 s while held,
+  // decays over ~0.4 s after release; release time solved so one full flip lands on the slope ----
+  let flipCache = null;
+  const flipPlan = () => {
+    if (flipCache) return flipCache;
+    const ramp = course.features.filter((f) => f.type === FeatureType.RAMP)[num('ramp', 1)];
+    const lip = ramp.lipX ?? ramp.x1;
+    const y0 = course.heightAt(lip);
+    const a0 = Math.atan2(course.heightAt(lip) - course.heightAt(lip - 6), 6);
+    const sp = num('speed', 640);
+    const G = 1500;
+    const DT = 1 / 480;
+    const sim = (tr) => {
+      // returns the trajectory sampled every DT until touchdown
+      let x = lip, y = y0, vx = sp * Math.cos(a0), vy = sp * Math.sin(a0) - num('pop', 680), ang = a0, w = 0, t = 0;
+      const pts = [];
+      for (;;) {
+        const held = t >= 0.06 && t < tr;
+        w = held ? -6.6 * Math.min(1, (t - 0.06) / 0.35) : w * Math.exp(-DT / 0.16);
+        ang += w * DT;
+        vy += G * DT;
+        x += vx * DT;
+        y += vy * DT;
+        t += DT;
+        pts.push([x, y, vx, vy, ang, w]);
+        if ((y >= surfaceY(course, x) && t > 0.1) || t > 4) break;
+      }
+      return pts;
+    };
+    // find the release time so the board lands ~aligned with the slope after one turn
+    let lo = 0.1, hi = 1.6, pts = sim(0.9);
+    for (let k = 0; k < 30; k++) {
+      const mid = (lo + hi) / 2;
+      pts = sim(mid);
+      const [xl, , , , angl] = pts[pts.length - 1];
+      const want = Math.atan(course.slopeAt(xl)) - Math.PI * 2;
+      if (angl > want) lo = mid; else hi = mid;
+    }
+    flipCache = { lip, y0, a0, sp, pts, DT, T: pts.length * DT, tr: (lo + hi) / 2 };
+    return flipCache;
+  };
+  window.__flipPlan = () => flipPlan();
   const seqView = (rel, i) => {
     const speed = num('speed', 520);
     const X0 = num('x', course.startX + 500) + (i ? -95 * i : 0);
     const id = i === 0 ? 'local' : `g${i}`;
     const base = { mode: RiderMode.GROUND, crouch: 0.1, scarf: num('scarf', 0.7), boostT: 0, boostLevel: 0, shield: false, hoverT: 0 };
     let st;
+    if (seqMode === 'flip') {
+      const F = flipPlan();
+      const t = rel / 1000;
+      if (t < 0) {
+        const x = F.lip + F.sp * t;
+        st = { ...base, x, y: course.heightAt(x), vx: F.sp * Math.cos(F.a0), vy: F.sp * Math.sin(F.a0), angle: Math.atan(course.slopeAt(x)), crouch: 0.15 };
+      } else if (t < F.T) {
+        const [x, y, vx, vy, ang] = F.pts[Math.min(F.pts.length - 1, Math.floor(t / F.DT))];
+        st = { ...base, mode: RiderMode.AIR, x, y, vx, vy, angle: ang, crouch: 0.2 };
+      } else {
+        const [xl, , vxl] = F.pts[F.pts.length - 1];
+        const x = xl + vxl * (t - F.T);
+        const a = Math.atan(course.slopeAt(x));
+        st = { ...base, x, y: course.heightAt(x), vx: Math.cos(a) * vxl, vy: Math.sin(a) * vxl, angle: a, crouch: 0.1 };
+      }
+      return viewOf(st, i === 0 ? 'local' : `g${i}`, i, i === 0);
+    }
     if (seqMode === 'land') {
       const x = X0 + (speed * rel) / 1000;
       const ang = Math.atan(course.slopeAt(x));
@@ -256,6 +325,12 @@ async function main() {
     return viewOf(st, id, i, i === 0);
   };
   const seqEvent = (prevRel, rel) => {
+    if (seqMode === 'flip') {
+      const T = flipPlan().T * 1000;
+      if (prevRel < 0 && rel >= 0) return { type: SimEvent.JUMP, data: {} };
+      if (prevRel < T && rel >= T) return { type: SimEvent.LAND, data: { clean: true, impact: num('impact', 0.7) } };
+      return null;
+    }
     if (prevRel >= 0 || rel < 0) return null;
     if (seqMode === 'land') return { type: SimEvent.LAND, data: { clean: Q.get('sketchy') !== '1', sketchy: Q.get('sketchy') === '1', impact: num('impact', 0.7) } };
     if (seqMode === 'crashslide') return { type: SimEvent.CRASH, data: { cause: 'landing' } };
@@ -282,6 +357,9 @@ async function main() {
       p.pixelDensity(Math.min(2, num('dpr', window.devicePixelRatio || 1)));
       renderer = new Renderer(p, course);
       renderer.camera.debugZoom = num('camzoom', 1);
+      // screenshots are always rendered at full quality; live runs use the governor unless quality= is given
+      renderer.setQuality(Q.get('quality') || (freeze ? 'high' : 'auto'));
+      if (Q.get('reduced') === '1') renderer.setReducedEffects(true);
       window.__renderer = renderer;
       if (freeze) {
         p.noLoop();
@@ -294,7 +372,10 @@ async function main() {
       const local = poseView(x, 0, timeMs);
       const others = [];
       for (let i = 1; i <= nGhosts; i++) others.push(poseView(x, i, timeMs));
-      return { timeMs, dtMs, local, others, events, phase: 'racing', cinematic: Q.get('cinematic') === '1' };
+      const fr = { timeMs, dtMs, local, others, events, phase: 'racing', cinematic: Q.get('cinematic') === '1' };
+      if (Q.get('markers') === '1') fr.markers = others.map((o) => ({ id: o.id, gapS: (o.x - local.x) / Math.max(200, Math.abs(local.vx)) }));
+      if (Q.has('focus')) fr.focusId = Q.get('focus');
+      return fr;
     };
 
     const frameSim = (timeMs, dtMs) => {
@@ -308,7 +389,7 @@ async function main() {
     const eventFor = (name, v) => {
       switch (name) {
         case 'land': return { type: SimEvent.LAND, data: { clean: true, impact: 0.9 } };
-        case 'crash': return { type: SimEvent.CRASH, data: { cause: 'landing', x: v.x, y: v.y } };
+        case 'crash': return { type: SimEvent.CRASH, data: { cause: Q.get('cause') || 'landing', x: v.x + num('cx', 0), y: v.y } };
         case 'smash': {
           // smash the nearest solid obstacle ahead (hidden from then on)
           const solid = ['rock', 'log', 'snowman', 'spikes', 'campfire'];
@@ -342,6 +423,59 @@ async function main() {
           prevRel = rel;
           renderer.draw({ timeMs: t0 + k * dtMs, dtMs, local, others, events: ev ? [ev] : [], phase: 'racing' });
         }
+      } else if (Q.has('scen') && useSim) {
+        // ---- scripted REAL-sim scenario, frozen at an exact offset from a sim event ----
+        const scen = Q.get('scen');
+        const ramps = course.features.filter((f) => f.type === FeatureType.RAMP);
+        const lines = course.features.filter((f) => f.type === FeatureType.GRIND && f.kind === 'bunting');
+        const speed = num('speed', 720);
+        const place = (sim) => {
+          let x;
+          if (scen === 'flip') x = ramps[num('ramp', 0)].lipX - num('runup', 420);
+          else if (scen === 'grind') x = lines[num('line', 0)].x0 - num('runup', 320);
+          else x = num('x', course.startX + 3000);
+          const a = Math.atan(course.slopeAt(x));
+          Object.assign(sim.state, { x, y: course.heightAt(x), vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, angle: a, mode: RiderMode.GROUND });
+        };
+        const bot = new mods.Bot(course, seed * 13, 0.85);
+        const makeInput = () => {
+          let pressAt = -1;
+          return (sim, k) => {
+            const st = sim.state;
+            if (scen === 'flip') {
+              const lip = ramps[num('ramp', 0)].lipX;
+              if (pressAt < 0 && st.x >= lip - 70) pressAt = k;
+              return { held: pressAt >= 0 && (k - pressAt) * TICK_MS < num('hold', 1000) };
+            }
+            if (scen === 'tap') return { held: k * TICK_MS >= 300 && k * TICK_MS < 380 };
+            return bot.decide(st); // grind: the bot rides the chain
+          };
+        };
+        const [evName, evOff, evNth] = (Q.get('at') || 'jump:500').split(':');
+        const want = { jump: SimEvent.JUMP, land: SimEvent.LAND, grind: SimEvent.GRIND_START, rescue: SimEvent.RESCUE_START, trick: SimEvent.TRICK }[evName] || evName;
+        // pass 1: find the event tick
+        const dry = new mods.RiderSim(course);
+        dry.start();
+        place(dry);
+        let inp = makeInput();
+        let evTick = -1;
+        let seen = 0;
+        for (let k = 1; k < 60 * 12 && evTick < 0; k++) {
+          for (const e of dry.step(inp(dry, k)) || []) if (e.type === want && ++seen >= Number(evNth || 1)) evTick = k;
+        }
+        if (evTick < 0) console.warn('[harness] scenario event not found', evName);
+        const endTick = Math.max(1, evTick + Math.round(Number(evOff || 0) / TICK_MS));
+        // pass 2: render every tick from placement to the target
+        const sim = new mods.RiderSim(course);
+        sim.start();
+        place(sim);
+        inp = makeInput();
+        const base = targetMs - endTick * TICK_MS;
+        for (let k = 1; k <= endTick; k++) {
+          const ev = sim.step(inp(sim, k)) || [];
+          renderer.draw({ timeMs: base + k * TICK_MS, dtMs: TICK_MS, local: viewOf(sim.state, 'local', 0, true), others: [], events: ev, phase: 'racing' });
+        }
+        window.__scen = { evTick, endTick, x: sim.state.x, mode: sim.state.mode, angle: sim.state.angle };
       } else if (pose) {
         const x = num('x', 0);
         const speed = num('speed', 500);

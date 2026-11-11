@@ -5,7 +5,7 @@
 import { COURSE_LENGTHS, MAX_PLAYERS, PLAYER_COLORS, START_TIMES, WEATHERS } from '../contracts.js';
 import { h, icon, replay } from './dom.js';
 import { ICONS } from './icons.js';
-import { prettyUrl } from './format.js';
+import { formatTime, prettyUrl } from './format.js';
 import { encodeQr, qrPath } from './qr.js';
 
 /** Rough race durations shown under the course buttons (≈ 20 m/s average). */
@@ -50,6 +50,25 @@ export class LobbyView {
       h('div', { class: 'qr-wrap' }, this.qrEl, h('p', { class: 'qr-caption' }, h('span', { class: 'eyebrow' }, 'Scan to join'), h('span', {}, 'Point a phone camera here.')))
     );
 
+    // --- your scarf colour (taken colours are locked) ---
+    this.swatches = PLAYER_COLORS.map((color, i) =>
+      h(
+        'button',
+        {
+          class: 'swatch',
+          type: 'button',
+          role: 'radio',
+          'aria-checked': 'false',
+          'aria-label': `Colour ${i + 1}`,
+          style: { '--c': color },
+          'data-testid': `lobby-swatch-${i}`,
+          onclick: () => this.handlers.onProfileChange?.({ name: this.view?.selfName ?? '', colorIndex: i }),
+        },
+        h('span', { class: 'swatch__lock', 'aria-hidden': 'true' })
+      )
+    );
+    this.swatchRow = h('div', { class: 'lobby__scarf' }, h('span', { class: 'setting__label' }, 'Your scarf'), h('div', { class: 'swatches swatches--small', role: 'radiogroup', 'aria-label': 'Scarf colour' }, this.swatches));
+
     // --- roster ---
     this.countEl = h('span', { class: 'count', 'data-testid': 'player-count' });
     this.list = h('ul', { class: 'players', 'data-testid': 'player-list', 'aria-label': 'Riders in the room' });
@@ -65,7 +84,14 @@ export class LobbyView {
       ),
       startTime: this._segmented('startTime', 'Time', START_TIMES.map((k) => ({ value: k, label: TIME_LABELS[k] || k })), 'time'),
       weather: this._segmented('weather', 'Weather', WEATHERS.map((k) => ({ value: k, label: WEATHER_LABELS[k] || k }))),
+      catchUp: this._segmented('catchUp', 'Catch-up', [
+        { value: 'on', label: 'On' },
+        { value: 'off', label: 'Off' },
+      ]),
     };
+    // RaceSettings.catchUp is a boolean; the segmented control speaks 'on' / 'off'
+    this.groups.catchUp.toSetting = (v) => v === 'on';
+    this.groups.catchUp.el.title = 'Riders far behind get a small speed bonus';
     this.botsValue = h('output', { class: 'stepper__value', 'data-testid': 'setting-bots-value', 'aria-live': 'polite' }, '0');
     this.botsMinus = h('button', { class: 'stepper__btn', type: 'button', 'aria-label': 'Fewer bots', 'data-testid': 'setting-bots-minus', onclick: () => this._bots(-1) }, icon(ICONS.minus, 'icon icon--sm'));
     this.botsPlus = h('button', { class: 'stepper__btn', type: 'button', 'aria-label': 'More bots', 'data-testid': 'setting-bots-plus', onclick: () => this._bots(1) }, icon(ICONS.plus, 'icon icon--sm'));
@@ -82,6 +108,7 @@ export class LobbyView {
       this.groups.length.el,
       this.groups.startTime.el,
       this.groups.weather.el,
+      this.groups.catchUp.el,
       botsRow
     );
 
@@ -91,12 +118,24 @@ export class LobbyView {
     this.waiting = h('p', { class: 'waiting', 'data-testid': 'waiting-host' }, h('span', { class: 'waiting__text' }), h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')));
     this.cta = h('div', { class: 'lobby__cta' }, this.startBtn, this.startHint, this.waiting);
 
+    // --- joined mid-race: live mini-standings ---
+    this.liveRows = new Map();
+    this.liveList = h('ol', { class: 'live__list', 'data-testid': 'live-standings' });
+    this.liveEl = h(
+      'div',
+      { class: 'live', hidden: true, 'data-testid': 'race-in-progress' },
+      h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, h('span', { class: 'live__dot', 'aria-hidden': 'true' }), 'Race in progress'), h('span', { class: 'settings__note' }, "you're in the next one")),
+      this.liveList
+    );
+
     const main = h(
       'div',
       { class: 'glass lobby__main reveal', style: { '--d': '90ms' } },
       h('div', { class: 'section-head' }, h('h2', { class: 'section-title' }, 'Riders'), this.countEl),
       this.list,
       this.botsNote,
+      this.swatchRow,
+      this.liveEl,
       this.settingsEl,
       this.cta
     );
@@ -130,7 +169,8 @@ export class LobbyView {
 
     const s = view.settings || {};
     this.el.classList.toggle('is-host', !!view.isHost);
-    for (const [key, g] of Object.entries(this.groups)) g.set(s[key], !view.isHost);
+    for (const [key, g] of Object.entries(this.groups)) g.set(key === 'catchUp' ? (s.catchUp === false ? 'off' : 'on') : s[key], !view.isHost);
+    this._renderSwatches(view);
     const bots = Math.max(0, Math.min(MAX_BOTS, s.bots | 0));
     this.botsValue.textContent = String(bots);
     this.botsMinus.disabled = !view.isHost || bots <= 0;
@@ -146,10 +186,68 @@ export class LobbyView {
     this.startHint.textContent = view.isHost && !view.canStart ? view.startHint || defaultStartHint(view) : '';
     this.waiting.hidden = !!view.isHost;
     const host = (view.players || []).find((p) => p.isHost);
-    this.waiting.firstChild.textContent = host ? `Waiting for ${host.name} to start` : 'Waiting for the host to start';
+    this.waiting.firstChild.textContent = view.inProgress ? "A race is on. You're in the next one" : host ? `Waiting for ${host.name} to start` : 'Waiting for the host to start';
+    this._renderLive(view.inProgress ? view.live : null);
+  }
+
+  /** @param {Array<{id:string,name:string,color:string,progress:number,finished:boolean,timeMs?:number}>|null} rows */
+  _renderLive(rows) {
+    this.liveEl.hidden = !rows || !rows.length;
+    if (this.liveEl.hidden) {
+      if (this.liveRows.size) {
+        this.liveList.replaceChildren();
+        this.liveRows.clear();
+      }
+      return;
+    }
+    const seen = new Set();
+    rows.forEach((r, i) => {
+      seen.add(r.id);
+      let row = this.liveRows.get(r.id);
+      if (!row) {
+        const fill = h('span', { class: 'live__fill' });
+        const meta = h('span', { class: 'live__meta' });
+        const name = h('span', { class: 'live__name' });
+        row = { el: h('li', { class: 'live__row' }, h('span', { class: 'avatar avatar--sm' }, h('span', { class: 'avatar__scarf' })), name, h('span', { class: 'live__bar' }, fill), meta), fill, meta, name, key: '' };
+        this.liveRows.set(r.id, row);
+      }
+      const p = Math.round(Math.max(0, Math.min(1, r.progress)) * 100);
+      const key = `${r.name}|${r.color}|${p}|${r.finished}|${r.timeMs}`;
+      if (row.key !== key) {
+        row.key = key;
+        row.el.style.setProperty('--c', r.color);
+        row.name.textContent = r.name;
+        row.fill.style.transform = `scaleX(${p / 100})`;
+        row.meta.textContent = r.finished ? (r.timeMs >= 0 ? formatTime(r.timeMs) : 'done') : `${p}%`;
+        row.el.classList.toggle('is-done', !!r.finished);
+      }
+      if (this.liveList.children[i] !== row.el) this.liveList.insertBefore(row.el, this.liveList.children[i] || null);
+    });
+    for (const [id, row] of this.liveRows) {
+      if (!seen.has(id)) {
+        row.el.remove();
+        this.liveRows.delete(id);
+      }
+    }
   }
 
   /* ---------------- internals ---------------- */
+
+  _renderSwatches(view) {
+    const players = view.players || [];
+    const me = players.find((p) => p.id === view.selfId);
+    const mine = me ? me.colorIndex : -1;
+    const taken = new Set(view.takenColors ?? players.filter((p) => p.id !== view.selfId && p.connected !== false).map((p) => p.colorIndex));
+    this.view.selfName = me?.name ?? '';
+    this.swatches.forEach((b, i) => {
+      const isMine = i === mine;
+      const locked = taken.has(i) && !isMine;
+      b.setAttribute('aria-checked', String(isMine));
+      b.disabled = locked;
+      b.classList.toggle('is-taken', locked);
+      b.title = locked ? 'Taken' : '';
+    });
+  }
 
   _renderPlayers(players, selfId) {
     const seen = new Set();
@@ -210,13 +308,19 @@ export class LobbyView {
       { class: 'player', 'data-testid': 'player-row', 'data-player-id': id },
       h('span', { class: 'avatar' }, h('span', { class: 'avatar__scarf' })),
       h('span', { class: 'player__name' }),
-      h('span', { class: 'player__tags' })
+      h('span', { class: 'player__tags' }),
+      h(
+        'button',
+        { class: 'player__remove', type: 'button', hidden: true, 'data-testid': 'remove-player', 'aria-label': 'Remove from the room', title: 'Remove', onclick: () => this.handlers.onRemovePlayer?.(id, li.querySelector('.player__name').textContent) },
+        icon(ICONS.remove, 'icon icon--sm')
+      )
     );
     li.addEventListener('animationend', () => li.classList.remove('is-new'));
     return li;
   }
 
   _updateRow(li, p, isSelf) {
+    li.querySelector('.player__remove').hidden = !this.view?.isHost || isSelf;
     const key = `${p.name}|${p.colorIndex}|${p.isHost}|${p.connected}|${p.ready}|${isSelf}`;
     if (li.__key === key) return;
     li.__key = key;
@@ -248,7 +352,7 @@ export class LobbyView {
           onclick: () => {
             if (!this.view?.isHost) return;
             g.set(o.value, false); // optimistic; setLobby() is authoritative
-            this.handlers.onSettings?.({ [key]: o.value });
+            this.handlers.onSettings?.({ [key]: g.toSetting ? g.toSetting(o.value) : o.value });
           },
         },
         h('span', { class: 'seg__label' }, o.label),
@@ -324,7 +428,7 @@ export class LobbyView {
     }
     this.handlers.onCopyLink?.();
     this.copyBtn.classList.toggle('is-done', ok);
-    this.copyLabel.textContent = ok ? 'Copied!' : 'Press Ctrl+C';
+    this.copyLabel.textContent = ok ? 'Copied' : 'Press Ctrl+C';
     if (!ok) selectText(this.linkEl);
     clearTimeout(this._copyTimer);
     this._copyTimer = setTimeout(() => {
@@ -337,7 +441,7 @@ export class LobbyView {
     const v = this.view;
     if (!v) return;
     try {
-      await navigator.share({ title: 'Snowline', text: `Race me on Snowline — room ${v.code}`, url: v.shareUrl });
+      await navigator.share({ title: 'Snowline', text: `Race me on Snowline. Room ${v.code}`, url: v.shareUrl });
     } catch {
       /* cancelled */
     }
@@ -347,7 +451,7 @@ export class LobbyView {
 function defaultStartHint(view) {
   const players = view.players || [];
   if (players.length < 2 && !(view.settings?.bots > 0)) return 'Invite a friend or add a bot to start';
-  if (players.some((p) => p.ready === false)) return 'Waiting for riders to come back from the results…';
+  if (players.some((p) => p.ready === false)) return 'Waiting for riders still on the results screen';
   return 'Getting everyone ready…';
 }
 

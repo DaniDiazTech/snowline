@@ -3068,6 +3068,606 @@ kbd {
 }
 
 /* --------------------------------------------------------------------------
+   PERFORMANCE: no backdrop-filter while racing.
+   A blurred element over a full-screen canvas that changes every frame makes the
+   compositor re-blur that region every frame (measured: ~2x GPU-process time on the
+   race screen for one 40 px button). Racing uses solid translucent fills instead.
+   -------------------------------------------------------------------------- */
+
+:root[data-screen='race'] .icon-btn--glass,
+:root[data-screen='race'] .conn,
+:root[data-screen='race'] .announce__pill,
+:root[data-screen='race'] .toast,
+:root[data-screen='race'] .glass,
+:root[data-screen='race'] .modal__scrim {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-screen='race'] .icon-btn--glass,
+:root[data-screen='race'] .announce__pill {
+  background: rgba(255, 255, 255, 0.72);
+}
+:root[data-screen='race'] .glass {
+  background: var(--glass-strong);
+}
+:root[data-screen='race'] .modal__panel {
+  background: rgba(246, 248, 251, 0.95);
+}
+:root[data-screen='race'][data-tone='night'] .modal__panel {
+  background: rgba(18, 23, 40, 0.95);
+}
+:root[data-screen='race'] .modal__scrim {
+  background: rgba(22, 30, 48, 0.4);
+}
+:root[data-screen='race'][data-tone='night'] .icon-btn--glass,
+:root[data-screen='race'][data-tone='night'] .announce__pill {
+  background: rgba(16, 21, 38, 0.72);
+}
+/* Elements that sit still while the scene animates: keep them on their own layer. */
+.hud-time,
+.hud-speed b {
+  contain: layout paint;
+}
+
+/* --------------------------------------------------------------------------
+   Corner chrome additions: settings gear, fullscreen
+   -------------------------------------------------------------------------- */
+
+.chrome .icon-btn--glass .icon {
+  width: 19px;
+  height: 19px;
+}
+[data-testid='open-settings'] .icon {
+  transition: transform 0.6s var(--ease);
+}
+[data-testid='open-settings']:hover .icon {
+  transform: rotate(60deg);
+}
+:root[data-screen='race'] .chrome {
+  gap: 8px;
+}
+
+/* notice toasts (not errors) */
+.toast--info .toast__dot,
+.toast--good .toast__dot {
+  background: #7fd0a0;
+  box-shadow: 0 0 0 4px rgba(127, 208, 160, 0.2);
+}
+.toast--info .toast__dot {
+  background: #9ccfff;
+  box-shadow: 0 0 0 4px rgba(156, 207, 255, 0.2);
+}
+.toast--warn .toast__dot {
+  background: var(--gold);
+  box-shadow: 0 0 0 4px rgba(230, 184, 74, 0.22);
+}
+
+/* --------------------------------------------------------------------------
+   SETTINGS dialog
+   -------------------------------------------------------------------------- */
+
+.prefs {
+  width: min(460px, 100%);
+}
+.prefs__body {
+  margin-top: 10px;
+}
+.prefs__group {
+  padding: 16px 0;
+  border-top: 1px solid var(--hair);
+}
+.prefs__group:first-child {
+  border-top: 0;
+  padding-top: 8px;
+}
+.prefs__group .section-title {
+  margin-bottom: 12px;
+}
+.prefs__note {
+  margin: 10px 2px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+.prefs__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 44px;
+}
+.prefs__row + .prefs__row {
+  margin-top: 6px;
+}
+.prefs__row--volume {
+  grid-template-columns: 76px 1fr 34px;
+}
+.prefs__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 15px;
+  color: var(--ink);
+}
+.prefs__label small {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+.prefs__row--volume .prefs__label {
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+}
+.prefs__value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink-2);
+}
+.prefs__foot {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--hair);
+}
+
+.switch {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hair-2);
+  cursor: pointer;
+  transition: background-color 0.25s;
+}
+.switch__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px -1px rgba(10, 20, 40, 0.35);
+  transition: transform 0.3s var(--spring);
+}
+.switch[aria-checked='true'] {
+  background: var(--primary);
+}
+.switch[aria-checked='true'] .switch__knob {
+  transform: translateX(20px);
+}
+:root[data-tone='night'] .switch[aria-checked='true'] .switch__knob {
+  background: var(--on-primary);
+}
+
+.range {
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hair-2);
+}
+.range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hair-2);
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -9px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 2px 8px -2px rgba(10, 20, 40, 0.45);
+}
+.range::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--primary);
+}
+.range:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --------------------------------------------------------------------------
+   HOW-TO (first run) and CONFIRM dialogs
+   -------------------------------------------------------------------------- */
+
+.howto-panel {
+  width: min(440px, 100%);
+  padding: 26px 26px 18px;
+}
+.howto-panel .modal__title {
+  font-size: 32px;
+}
+.howto__sub {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--ink-3);
+}
+.howto__body {
+  flex: 0 1 auto;
+}
+.howto {
+  margin: 18px 0 20px;
+  padding: 0;
+  list-style: none;
+}
+.howto__row {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  grid-template-areas: 'icon what' 'icon text';
+  column-gap: 14px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--hair);
+  animation: howto-in 0.5s var(--ease) both;
+  animation-delay: calc(80ms * var(--i, 0) + 120ms);
+}
+.howto__row:first-child {
+  border-top: 0;
+}
+.howto__icon {
+  grid-area: icon;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--field);
+  border: 1px solid var(--hair);
+  color: var(--ink);
+}
+.howto__what {
+  grid-area: what;
+  font-size: 15px;
+  color: var(--ink);
+}
+.howto__what b {
+  font-weight: 500;
+}
+.howto__or {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+.howto__text {
+  grid-area: text;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink-2);
+}
+.howto__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+/* short landscape phones: two columns, smaller title, everything on one screen */
+@media (max-height: 520px) and (min-width: 601px) {
+  .howto-panel {
+    width: min(720px, 100%);
+    padding: 18px 22px 12px;
+  }
+  .howto-panel .modal__title {
+    font-size: 24px;
+  }
+  .howto__sub {
+    margin-top: 4px;
+    font-size: 13px;
+  }
+  .howto {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 22px;
+    margin: 10px 0 12px;
+  }
+  .howto__row {
+    padding: 8px 0;
+  }
+  .howto__row:nth-child(2) {
+    border-top: 0;
+  }
+  .howto__actions {
+    flex-direction: row-reverse;
+    justify-content: space-between;
+  }
+  .howto__actions .btn--block {
+    width: auto;
+    min-width: 220px;
+    height: 44px;
+  }
+  .prefs {
+    width: min(760px, 100%);
+    padding: 16px 22px 8px;
+  }
+  .prefs .modal__title {
+    font-size: 26px;
+  }
+  .prefs__body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 28px;
+    margin-top: 4px;
+  }
+  .prefs__group {
+    padding: 8px 0;
+  }
+  .prefs__group:nth-child(2) {
+    grid-row: span 2;
+    border-top: 0;
+    padding-top: 8px;
+  }
+  .prefs__group .section-title {
+    margin-bottom: 8px;
+  }
+  .prefs__foot {
+    grid-column: 1 / -1;
+    padding: 4px 0 0;
+  }
+}
+@keyframes howto-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.confirm {
+  width: min(400px, 100%);
+  padding: 24px;
+}
+.confirm .modal__title {
+  font-size: 28px;
+}
+.confirm__body {
+  margin: 10px 0 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+.confirm__actions .btn {
+  height: 44px;
+  padding: 0 20px;
+}
+
+/* --------------------------------------------------------------------------
+   HOME: rejoin after a refresh
+   -------------------------------------------------------------------------- */
+
+.rejoin {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--hair);
+}
+.rejoin__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+}
+.rejoin__code {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+.home--invite .home__card.has-rejoin {
+  grid-template-areas: 'rejoin' 'name' 'swatches' 'join' 'divider' 'create' 'secondary';
+}
+.home--invite .rejoin {
+  grid-area: rejoin;
+}
+/* the rejoin button already joins that room: no second code field */
+.home__card.has-rejoin .join {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   LOBBY: race in progress (joined mid-race)
+   -------------------------------------------------------------------------- */
+
+.live {
+  margin-top: 20px;
+  padding: 16px 16px 10px;
+  border-radius: var(--r-md);
+  background: var(--field);
+  border: 1px solid var(--hair);
+}
+.live .section-head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+  margin-bottom: 8px;
+}
+.live .section-head > * {
+  white-space: nowrap;
+}
+.live .section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.live__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bad);
+  box-shadow: 0 0 0 3px rgba(217, 80, 59, 0.18);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.live__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.live__row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 7.5em) 1fr 4.5em;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+}
+.live__name {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live__bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hair);
+  overflow: hidden;
+}
+.live__fill {
+  position: absolute;
+  inset: 0;
+  background: var(--c);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.3s linear;
+}
+.live__meta {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink-3);
+}
+.live__row.is-done .live__meta {
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------------------------
+   Portrait phone: rotate hint (the game plays best in landscape)
+   -------------------------------------------------------------------------- */
+
+.rotate-hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-b) + 18px);
+  z-index: 6;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(22, 28, 44, 0.86);
+  color: #f6f3ec;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  transform: translateX(-50%);
+  pointer-events: none;
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.5);
+}
+.rotate-hint .icon {
+  flex: none;
+  animation: tilt 2.4s var(--ease) infinite;
+}
+@media (orientation: portrait) and (pointer: coarse) and (max-width: 600px) {
+  :root[data-screen='race'] .rotate-hint {
+    display: flex;
+  }
+  /* racing: in the empty snow below the rider, and it fades away after a few seconds */
+  :root[data-screen='race'] .rotate-hint {
+    bottom: 34%;
+    animation: rotate-hint-out 0.6s 7s var(--ease-in) forwards;
+  }
+}
+:root[data-modal] .rotate-hint {
+  display: none !important;
+}
+@keyframes rotate-hint-out {
+  to { opacity: 0; visibility: hidden; }
+}
+@keyframes tilt {
+  0%, 30% { transform: none; }
+  55%, 85% { transform: rotate(-90deg); }
+  100% { transform: none; }
+}
+
+/* debug corner (?fps=1) */
+.fps-corner {
+  position: fixed;
+  right: calc(var(--safe-r) + 8px);
+  bottom: calc(var(--safe-b) + 6px);
+  z-index: 30;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(10, 14, 26, 0.6);
+  color: #e9f0f7;
+  font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
+   Reduce effects (settings) — same treatment as the system preference.
+   -------------------------------------------------------------------------- */
+
+:root[data-reduce-fx] *,
+:root[data-reduce-fx] *::before,
+:root[data-reduce-fx] *::after {
+  transition-duration: 0.01ms !important;
+}
+:root[data-reduce-fx] .wordmark span,
+:root[data-reduce-fx] .podium__block,
+:root[data-reduce-fx] .podium__rider,
+:root[data-reduce-fx] .fame__row,
+:root[data-reduce-fx] .player.is-new,
+:root[data-reduce-fx] .rider__scarf,
+:root[data-reduce-fx] .finished__card,
+:root[data-reduce-fx] .combo.pop .combo__pts,
+:root[data-reduce-fx] .gauge.is-surge,
+:root[data-reduce-fx] .ring.is-on,
+:root[data-reduce-fx] .shake,
+:root[data-reduce-fx] .howto__row,
+:root[data-reduce-fx] .rotate-hint .icon,
+:root[data-reduce-fx] .live__dot,
+:root[data-reduce-fx] .dots i,
+:root[data-reduce-fx] .cd__ring {
+  animation: none !important;
+}
+:root[data-reduce-fx] .screen .reveal {
+  transform: none;
+}
+:root[data-reduce-fx] .trick > * {
+  animation-name: fade-hold !important;
+}
+:root[data-reduce-fx] .cd,
+:root[data-reduce-fx] .announce__pill,
+:root[data-reduce-fx] .toast {
+  animation-name: fade-in !important;
+}
+:root[data-reduce-fx] .cd.is-out,
+:root[data-reduce-fx] .announce__pill.is-out,
+:root[data-reduce-fx] .toast.is-out {
+  animation-name: fade-out !important;
+}
+
+/* --------------------------------------------------------------------------
    Reduced motion: keep fades, drop movement.
    -------------------------------------------------------------------------- */
 
@@ -3092,6 +3692,8 @@ kbd {
   .ring.is-on,
   .shake,
   .rider-preview.is-flutter .rider,
+  .howto__row,
+  .rotate-hint .icon,
   .dots i {
     animation: none !important;
   }
@@ -3139,4 +3741,838 @@ kbd {
 }
 @keyframes fade-out {
   to { opacity: 0; }
+}
+
+/* ==========================================================================
+   TYPE: Fredoka (display: wordmark, titles, big numerals) + Nunito (UI text
+   and every live number: Nunito's figures are tabular, Fredoka's are not, so
+   the timer and speed never jitter).
+   ========================================================================== */
+
+:root {
+  --f-ui: 'Nunito', 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+  --f-display: 'Fredoka', 'Nunito', 'Avenir Next', system-ui, sans-serif;
+  --f-serif: var(--f-display); /* older rules name the display face "serif" */
+}
+body {
+  font-weight: 500;
+}
+.eyebrow,
+.section-title {
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+.btn {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+/* the display face has no italic: the old italic accents become plain Fredoka */
+.brand__tagline,
+.settings__note,
+.waiting,
+.combo__mult,
+.banked__mult,
+.trick__pts,
+.fame__empty p:first-of-type {
+  font-style: normal;
+}
+.brand__tagline {
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.settings__note,
+.waiting {
+  font-weight: 400;
+}
+.modal__title,
+.results__winner,
+.finished__place,
+.podium__place,
+.fame__rank {
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.trick__label {
+  font-family: var(--f-display);
+  font-weight: 500;
+}
+.trick__pts,
+.banked__pts,
+.banked__mult,
+.combo__mult {
+  font-weight: 600;
+}
+.room-code {
+  font-family: var(--f-display);
+  font-weight: 500;
+}
+
+/* Wordmark: a lockup, the mountain glyph sitting on the cap line next to the name. */
+.brand {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas: 'emblem word' '. tag';
+  align-items: end;
+  column-gap: clamp(10px, 1.2vw, 18px);
+}
+.brand__emblem {
+  grid-area: emblem;
+  width: clamp(44px, 4.6vw, 72px);
+  margin: 0 0 0.12em;
+  stroke-width: 3;
+  opacity: 1;
+}
+.wordmark {
+  grid-area: word;
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: clamp(44px, 6.4vw, 100px);
+  line-height: 0.9;
+}
+.wordmark span {
+  margin-right: 0.08em;
+}
+.wordmark span:nth-child(n) {
+  font-weight: 600;
+}
+.wordmark span:nth-child(n + 5) {
+  font-weight: 400;
+}
+.brand__tagline {
+  grid-area: tag;
+}
+
+/* ==========================================================================
+   RACE HUD WIDGETS
+   Flat, small and quiet. Solid translucent fills (no backdrop-filter while
+   racing); every per-frame change is a transform or text, never layout.
+   ========================================================================== */
+
+.hud {
+  --plate: rgba(255, 255, 255, 0.62);
+  --plate-edge: rgba(255, 255, 255, 0.85);
+  --plate-ink: #1d2a40;
+  --plate-soft: rgba(29, 42, 64, 0.55);
+  --tier: var(--plate-ink);
+  text-shadow: none;
+}
+:root[data-tone='night'] .hud {
+  --plate: rgba(14, 20, 38, 0.5);
+  --plate-edge: rgba(255, 255, 255, 0.14);
+  --plate-ink: #f4f1ea;
+  --plate-soft: rgba(244, 241, 234, 0.6);
+}
+
+/* time + position plaque */
+.plaque {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px 8px 10px;
+  border-radius: 16px;
+  background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--plate-edge), 0 6px 18px -12px rgba(10, 20, 40, 0.5);
+  color: var(--plate-ink);
+}
+.plaque__cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.plaque__icon {
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.9;
+  opacity: 0.7;
+}
+.plaque__sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--plate-soft);
+  opacity: 0.35;
+}
+.hud-time {
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: clamp(20px, 1.9vw, 26px);
+  letter-spacing: 0.01em;
+}
+.hud-pos {
+  margin: 0;
+  align-items: baseline;
+  color: var(--plate-soft);
+  font-weight: 700;
+}
+.hud-pos b {
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: clamp(20px, 1.9vw, 26px);
+  color: var(--plate-ink);
+}
+
+/* progress track: rider pennants and a finish flag */
+.track__line {
+  height: 3px;
+  margin-top: -1.5px;
+  background: var(--hud-faint);
+}
+.track__fill {
+  height: 3px;
+  margin-top: -1.5px;
+  opacity: 0.6;
+  box-shadow: none;
+}
+.marker__dot {
+  top: 50%;
+  width: 9px;
+  height: 8px;
+  margin: -13px 0 0 0;
+  border-radius: 0;
+  background: var(--c);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  box-shadow: none;
+}
+.marker__dot::before {
+  content: none;
+}
+.marker::after {
+  /* the pennant's pole, standing on the track */
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 1.5px;
+  height: 13px;
+  margin: -13px 0 0 -0.5px;
+  border-radius: 1px;
+  background: var(--hud-ink);
+  opacity: 0.55;
+}
+:root[data-tone='night'] .marker__dot {
+  box-shadow: none;
+}
+.marker.is-local .marker__dot {
+  width: 13px;
+  height: 11px;
+  margin: -19px 0 0 0;
+  box-shadow: none;
+}
+.marker.is-local::after {
+  height: 19px;
+  margin-top: -19px;
+  width: 2px;
+  opacity: 0.9;
+}
+.marker.is-done .marker__dot {
+  opacity: 0.45;
+}
+.track__flag {
+  top: -16px;
+  right: -10px;
+  filter: none;
+}
+.track__flag .icon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+/* combo: trick chips + multiplier badge + points */
+.combo {
+  align-items: center;
+  gap: 8px;
+}
+.combo__tricks {
+  display: inline-flex;
+  gap: 5px;
+  letter-spacing: 0;
+}
+.combo__tricks .trick-chip {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--plate-edge);
+  color: var(--plate-ink);
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.combo__mult {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--hud-accent);
+  color: #fff;
+  font-family: var(--f-display);
+  font-size: 16px;
+}
+:root[data-tone='night'] .combo__mult {
+  color: #1d2a40;
+}
+.combo__pts {
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: 24px;
+  color: var(--hud-ink);
+  text-shadow: var(--hud-halo);
+}
+
+/* bottom-left: speedometer + scarf ribbon */
+.hud__bl {
+  align-items: flex-end;
+  gap: 16px;
+}
+.hud__bl::before {
+  content: none;
+}
+.speedo {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  width: clamp(104px, 9vw, 128px);
+  padding: 10px 10px 8px;
+  border-radius: 18px;
+  background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--plate-edge), 0 6px 18px -12px rgba(10, 20, 40, 0.5);
+  color: var(--plate-ink);
+}
+.speedo[data-level='1'] { --tier: var(--boost-1); }
+.speedo[data-level='2'] { --tier: var(--boost-2); }
+.speedo[data-level='3'] { --tier: var(--boost-3); }
+.speedo__svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.speedo__track,
+.speedo__ticks {
+  fill: none;
+  stroke-linecap: round;
+}
+.speedo__track {
+  stroke: var(--plate-soft);
+  stroke-width: 1.5;
+  opacity: 0.35;
+}
+.speedo__ticks {
+  stroke: var(--plate-ink);
+  stroke-width: 5;
+  stroke-linecap: butt;
+  stroke-dasharray: 2 6.58;
+  opacity: 0.22;
+}
+.speedo__dot {
+  transform-box: view-box;
+  transform-origin: 50px 50px;
+  transform: rotate(-90deg);
+  transition: transform 0.12s linear;
+}
+.speedo__dot circle {
+  fill: var(--tier);
+  stroke: var(--plate);
+  stroke-width: 2;
+  transition: fill 0.3s;
+}
+.speedo:not([data-level='0']) .speedo__dot circle {
+  filter: drop-shadow(0 0 4px var(--tier));
+}
+.speedo .hud-speed {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 9px;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.speedo .hud-speed b {
+  min-width: 0;
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: clamp(22px, 2vw, 28px);
+  line-height: 1;
+}
+.speedo .hud-speed small {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: var(--plate-soft);
+}
+
+.hud__meter {
+  gap: 6px;
+  padding-bottom: 4px;
+}
+.gauge-label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--hud-soft);
+  text-shadow: var(--hud-halo);
+}
+.gauge {
+  width: clamp(120px, 12vw, 170px);
+  height: 20px;
+  background: none;
+  border-radius: 0;
+}
+.ribbon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.ribbon__bg {
+  fill: var(--plate);
+}
+.ribbon__edge {
+  fill: none;
+  stroke: var(--plate-edge);
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+.gauge__fill {
+  transform-box: fill-box;
+  transform-origin: left center;
+  fill: var(--scarf, #e8553d);
+  opacity: 1;
+  background: none;
+  transition: transform 0.25s linear, fill 0.4s;
+}
+.gauge:not([data-level='0']):not([data-level='']) .gauge__fill {
+  fill: var(--glow);
+  box-shadow: none;
+}
+.gauge:not([data-level='0']):not([data-level='']) .ribbon {
+  filter: drop-shadow(0 0 5px var(--glow));
+}
+.gauge__boost {
+  bottom: -6px;
+  height: 2px;
+  border-radius: 1px;
+}
+.gauge__tag {
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+}
+.rings {
+  margin-top: 4px;
+}
+.ring {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--plate);
+}
+.ring__bg,
+.ring__arc {
+  stroke-width: 2.4;
+}
+.ring__icon {
+  filter: none;
+  color: var(--plate-ink);
+}
+
+/* countdown: heavier numerals with a soft bounce (transform + opacity only) */
+.cd__num {
+  font-family: var(--f-display);
+  font-weight: 600;
+  text-shadow: 0 6px 30px rgba(255, 255, 255, 0.35), var(--hud-halo);
+}
+.cd--go .cd__num {
+  font-family: var(--f-display);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  margin-right: -0.08em;
+}
+.cd {
+  animation: cd-bounce 0.62s var(--spring) both;
+}
+.cd.is-out {
+  animation: cd-drop 0.4s var(--ease-in) both;
+}
+@keyframes cd-bounce {
+  0% { opacity: 0; transform: translateY(-14%) scale(0.7); }
+  55% { opacity: 1; transform: translateY(3%) scale(1.06); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes cd-drop {
+  to { opacity: 0; transform: translateY(10%) scale(0.86); }
+}
+
+/* phones */
+@media (max-width: 600px), (max-height: 520px) {
+  .plaque {
+    gap: 9px;
+    padding: 6px 11px 6px 8px;
+    border-radius: 13px;
+  }
+  .plaque__icon {
+    width: 14px;
+    height: 14px;
+  }
+  .hud-time,
+  .hud-pos b {
+    font-size: 18px;
+  }
+  .speedo {
+    width: 92px;
+    padding: 8px 8px 6px;
+    border-radius: 15px;
+  }
+  .speedo .hud-speed {
+    bottom: 6px;
+  }
+  .speedo .hud-speed b {
+    font-size: 18px;
+  }
+  .speedo .hud-speed small {
+    font-size: 8.5px;
+  }
+  .gauge {
+    width: 112px;
+    height: 16px;
+  }
+  .hud__bl {
+    gap: 12px;
+  }
+}
+@media (max-width: 600px) {
+  /* portrait: time + position stay on one row, the track drops below them */
+  .plaque .plaque__cell:last-child .plaque__icon {
+    display: none;
+  }
+}
+
+/* Neither face ships an italic: never fake one (the old italic accents render upright). */
+html {
+  font-synthesis-style: none;
+  font-synthesis: weight;
+}
+
+/* --------------------------------------------------------------------------
+   No frosted glass anywhere but the dialog scrim (over a frozen scene).
+   Blurring a region over a canvas that redraws every frame costs the GPU
+   ~25-35% more on the home and lobby screens (snowline-tests/perf/css.mjs).
+   Panels are flat, slightly translucent fills tinted like the scene instead.
+   -------------------------------------------------------------------------- */
+.glass,
+.icon-btn--glass,
+.btn--back,
+.conn,
+.toast,
+.announce__pill,
+.podium__block,
+.lobby__cta {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+:root {
+  --glass: rgba(247, 249, 252, 0.84);
+  --glass-strong: rgba(250, 251, 253, 0.94);
+}
+:root[data-tone='night'] {
+  --glass: rgba(20, 27, 48, 0.82);
+  --glass-strong: rgba(18, 24, 43, 0.94);
+}
+
+/* ==========================================================================
+   PARTY FLOW: gaps line, status chips, crash labels, spectating, awards,
+   lobby colours and host tools
+   ========================================================================== */
+
+/* top-left: the plaque, and the nearest riders under it */
+.hud__tl {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.hud__tl.plaque {
+  /* the plaque class moved to the inner element */
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+.hud-gaps {
+  padding-left: 4px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-ink);
+  text-shadow: var(--hud-halo);
+  white-space: nowrap;
+}
+.hud-gaps:empty {
+  display: none;
+}
+
+/* the top stack: track, combo row, status chips, announcements (each on its own row) */
+.hud__top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.hud__top > .track {
+  align-self: stretch;
+}
+.hud-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  min-height: 0;
+  margin-top: 2px;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px 0 9px;
+  border-radius: 999px;
+  background: var(--plate);
+  box-shadow: inset 0 0 0 1px var(--plate-edge);
+  color: var(--plate-ink);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  animation: chip-in 0.35s var(--spring) both;
+}
+.status-chip .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+}
+.status-chip small {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--plate-soft);
+}
+.status-chip--wind {
+  color: #2f7fc1;
+}
+:root[data-tone='night'] .status-chip--wind {
+  color: #9ccfff;
+}
+.status-chip--closing {
+  font-variant-numeric: tabular-nums;
+}
+@keyframes chip-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.92); }
+  to { opacity: 1; transform: none; }
+}
+.hud__top .announce {
+  position: static;
+  margin-top: 8px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+}
+.hud__top .announce__pill {
+  font-weight: 700;
+}
+
+/* crash reason next to the rider */
+.trick--crash .trick__label {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(217, 80, 59, 0.92);
+  color: #fff;
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  text-shadow: none;
+}
+
+/* spectating: the finish card becomes a corner chip */
+.finished.is-compact {
+  inset: auto calc(var(--safe-r) + clamp(16px, 3vw, 40px)) calc(var(--safe-b) + clamp(16px, 4vh, 36px)) auto;
+  padding: 0;
+  place-items: end;
+}
+.finished.is-compact .finished__card {
+  min-width: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-radius: 16px;
+  animation: none;
+}
+.finished.is-compact .finished__place {
+  font-size: 30px;
+}
+.finished.is-compact .finished__time {
+  font-size: 15px;
+}
+.finished.is-compact .waiting,
+.finished.is-compact .eyebrow {
+  display: none;
+}
+
+/* results: awards, your journey, guest hint */
+.awards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 6px;
+}
+.awards[hidden] {
+  display: none;
+}
+.award {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: var(--glass);
+  box-shadow: inset 0 0 0 1px var(--glass-edge);
+  font-size: 13px;
+}
+.award__label {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.award__who {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+}
+.award__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c);
+}
+.award__value {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.journey {
+  margin: 12px 2px 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.results__hint {
+  margin: 12px 2px 0;
+  font-family: var(--f-display);
+  font-size: 16px;
+  color: var(--ink-2);
+}
+
+/* lobby: your scarf colour (taken ones locked) */
+.lobby__scarf {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.swatches--small {
+  margin: 0;
+  gap: 4px;
+}
+.swatches--small .swatch {
+  max-width: 22px;
+}
+.swatch.is-taken {
+  cursor: not-allowed;
+  opacity: 0.4;
+  transform: none;
+}
+.swatch.is-taken .swatch__lock {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, transparent 45%, var(--ink) 45%, var(--ink) 55%, transparent 55%);
+  opacity: 0.8;
+}
+
+/* lobby: host can remove a rider */
+.player__remove {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.player__remove:hover {
+  background: var(--hair);
+  color: var(--bad);
+}
+.player__remove[hidden] {
+  display: none;
+}
+
+@media (max-width: 600px), (max-height: 520px) {
+  .status-chip {
+    height: 22px;
+    font-size: 11px;
+  }
+  .hud__top .announce {
+    margin-top: 4px;
+  }
+  .hud__top .announce__pill {
+    padding: 6px 14px 7px;
+    font-size: 13px;
+  }
+  .hud-gaps {
+    font-size: 11px;
+  }
+}
+.plaque {
+  display: flex;
+}
+.finished.is-compact .finished__place b {
+  font-size: 30px;
+  font-weight: 500;
+}
+.finished.is-compact .finished__place sup {
+  margin: 2px 0 0 2px;
+  font-size: 13px;
+}
+.finished.is-compact .finished__place {
+  margin: 0;
+}
+@media (max-height: 520px) {
+  .awards {
+    gap: 5px;
+    margin: 8px 0 2px;
+  }
+  .award {
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 9px;
+    font-size: 11.5px;
+  }
+  .award__label {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+  }
 }

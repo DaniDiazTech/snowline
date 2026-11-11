@@ -112,7 +112,16 @@ export class HomeView {
     this.fameBtn = h('button', { class: 'link-btn', type: 'button', 'data-testid': 'hall-of-fame', onclick: () => this.handlers.openFame() }, icon(ICONS.trophy, 'icon icon--sm'), 'Hall of fame');
     const secondary = h('div', { class: 'home__secondary' }, this.practiceBtn, h('span', { class: 'dot-sep', 'aria-hidden': 'true' }), this.fameBtn);
 
-    this.card = h('form', { class: 'glass home__card reveal', style: { '--d': '120ms' }, novalidate: true, onsubmit: (e) => e.preventDefault(), 'aria-label': 'Play' }, nameField, swatchGroup, this.createBtn, this.divider, joinRow, secondary);
+    // Back after a refresh: one tap to get into the same room under the same name.
+    this.rejoinCode = h('span', { class: 'rejoin__code' });
+    this.rejoinBtn = h(
+      'button',
+      { class: 'btn btn--primary btn--block', type: 'button', 'data-testid': 'rejoin', onclick: () => this._rejoin() },
+      h('span', { class: 'btn__label' }, 'Rejoin')
+    );
+    this.rejoinEl = h('div', { class: 'rejoin', hidden: true }, h('p', { class: 'rejoin__head' }, h('span', { class: 'eyebrow' }, 'Welcome back'), this.rejoinCode), this.rejoinBtn);
+
+    this.card = h('form', { class: 'glass home__card reveal', style: { '--d': '120ms' }, novalidate: true, onsubmit: (e) => e.preventDefault(), 'aria-label': 'Play' }, this.rejoinEl, nameField, swatchGroup, this.createBtn, this.divider, joinRow, secondary);
 
     const howto = h(
       'p',
@@ -156,13 +165,23 @@ export class HomeView {
     }
   }
 
+  /** @param {{code:string, name:string}|null} info */
+  setRejoin(info) {
+    this.rejoin = info;
+    this.rejoinEl.hidden = !info;
+    this.card.classList.toggle('has-rejoin', !!info);
+    if (!info) return;
+    this._rejoinLabel();
+    this.rejoinCode.textContent = `Room ${info.code}`;
+  }
+
   setBusy(busy, label) {
     this.busy = !!busy;
     this.card.classList.toggle('is-busy', this.busy);
-    for (const b of [this.createBtn, this.joinBtn, this.practiceBtn, this.fameBtn]) b.disabled = this.busy;
+    for (const b of [this.createBtn, this.joinBtn, this.practiceBtn, this.fameBtn, this.rejoinBtn]) b.disabled = this.busy;
     this.nameInput.readOnly = this.busy;
     this.codeInput.readOnly = this.busy;
-    for (const b of [this.createBtn, this.joinBtn, this.practiceBtn]) {
+    for (const b of [this.createBtn, this.joinBtn, this.practiceBtn, this.rejoinBtn]) {
       b.classList.remove('is-loading');
       if (b.__label !== undefined) {
         const l = b.querySelector('.btn__label') || b;
@@ -183,16 +202,23 @@ export class HomeView {
 
   onShow() {
     // Avoid popping the on-screen keyboard on touch devices.
-    if (matchMedia('(pointer: fine)').matches && !this.nameInput.value) this.nameInput.focus({ preventScroll: true });
+    if (matchMedia('(pointer: fine)').matches && !this.nameInput.value && this.rejoinEl.hidden) this.nameInput.focus({ preventScroll: true });
   }
 
   /* ---------------- internals ---------------- */
 
   _profile() {
-    return { name: this.nameInput.value.trim().slice(0, NAME_MAX), colorIndex: this.profile.colorIndex };
+    return { name: cleanName(this.nameInput.value).trim(), colorIndex: this.profile.colorIndex };
+  }
+
+  _rejoinLabel() {
+    if (!this.rejoin || this.busy) return;
+    const name = cleanName(this.nameInput.value).trim() || this.rejoin.name;
+    this.rejoinBtn.querySelector('.btn__label').textContent = `Rejoin as ${name}`;
   }
 
   _onNameInput() {
+    this._rejoinLabel();
     this.nameHint.textContent = '';
     this.nameInput.removeAttribute('aria-invalid');
     this.profile = this._profile();
@@ -223,9 +249,10 @@ export class HomeView {
   }
 
   _validName() {
-    const name = this.nameInput.value.trim();
-    if (name.length >= 1) return true;
-    this.nameHint.textContent = 'Pick a name first';
+    const name = cleanName(this.nameInput.value).trim();
+    if (this.nameInput.value !== name && document.activeElement !== this.nameInput) this.nameInput.value = name;
+    if (name.length >= 1 && /[\p{L}\p{N}]/u.test(name)) return true;
+    this.nameHint.textContent = name.length ? 'Use at least one letter or number' : 'Pick a name first';
     this.nameInput.setAttribute('aria-invalid', 'true');
     replay(this.nameInput.parentElement, 'shake');
     this.nameInput.focus({ preventScroll: true });
@@ -249,6 +276,12 @@ export class HomeView {
     if (!this._validName()) return;
     this.lastAction = this.joinBtn;
     this.handlers.onJoin?.(code, this._profile());
+  }
+
+  _rejoin() {
+    if (this.busy || !this._validName()) return;
+    this.lastAction = this.rejoinBtn;
+    this.handlers.onRejoin?.();
   }
 
   _practice() {
@@ -282,6 +315,16 @@ export class HomeView {
     });
     this.codeBox.classList.toggle('is-complete', v.length === CODE_LEN);
   }
+}
+
+/** No control / zero-width characters, single spaces, at most NAME_MAX characters (not UTF-16 units). */
+function cleanName(raw) {
+  const s = String(raw || '')
+    .normalize('NFC')
+    .replace(/[\p{C}\p{Zl}\p{Zp}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^\s+/, '');
+  return [...s].slice(0, NAME_MAX).join('');
 }
 
 /** Uppercase, strip anything that is not A–Z / 0–9, keep the first 5. Tolerates pasted URLs ("…?room=ABCDE"). */
