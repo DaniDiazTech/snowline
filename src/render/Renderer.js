@@ -158,7 +158,10 @@ export class Renderer {
 
   /** Frame budget in ms the caller draws at (see the header). */
   setFrameInterval(ms) {
-    this.frameBudget = Number.isFinite(ms) && ms > 4 ? ms : 16.7;
+    const budget = Number.isFinite(ms) && ms > 4 ? ms : 16.7;
+    // Callers may set this every frame: only a real change restarts the governor's measurement.
+    if (budget === this.frameBudget) return;
+    this.frameBudget = budget;
     this.gov.since = 0;
     this.gov.ft = this.frameBudget;
   }
