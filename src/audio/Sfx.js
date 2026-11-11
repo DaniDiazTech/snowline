@@ -9,7 +9,7 @@ const EVENTS = new Set(['jump', 'land', 'trick', 'combo', 'boost', 'grindStart',
 /** Minimum spacing (s) between two instances of the same sound; extra triggers are dropped. */
 const GAP = { jump: 0.12, land: 0.12, trick: 0.07, combo: 0.22, boost1: 0.5, boost2: 0.6, boost3: 0.7, coin: 0.045, grindStart: 0.25, grindEnd: 0.25, respawn: 0.5, rescueStart: 1, rockSmash: 0.08, click: 0.05, countdown: 0.2, pass: 0.8 };
 /** Per-sound loudness trims, measured with snowline-tests/audio/mix-qa.mjs (peak over the music+carve bed). */
-const TRIM = { jump: 0.409, land: 0.72, trick: 1.122, combo: 0.793, boost1: 1.364, boost2: 1.537, boost3: 1.682, grindStart: 0.785, grindEnd: 1.484, rockSmash: 0.496, coin: 1.056, feather: 1.125, magnet: 1.938, respawn: 1.574, chasmClear: 1.586, crash: 1.988, finish: 1.878, click: 1.147, join: 1.506, leave: 1.682, countdown: 1.054, go: 0.751, uifinish: 1.912, win: 2.804 };
+const TRIM = { jump: 0.58, land: 0.72, trick: 1.122, combo: 0.793, boost1: 1.364, boost2: 1.537, boost3: 1.682, grindStart: 0.785, grindEnd: 1.87, rockSmash: 0.44, coin: 1.056, feather: 1.125, magnet: 1.938, respawn: 1.574, chasmClear: 1.586, crash: 1.988, finish: 1.878, click: 1.147, join: 1.506, leave: 1.682, countdown: 1.054, go: 0.751, uifinish: 1.912, win: 2.804 };
 
 /** One-shot sound effects. Everything scheduled on the audio clock. */
 export class Sfx {
