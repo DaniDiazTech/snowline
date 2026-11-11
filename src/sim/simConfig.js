@@ -104,16 +104,16 @@ export const SIM = Object.freeze({
   CHASM_POP_TOL: 16, // px below the far lip that still pops up onto it
 
   /* ---- crash / respawn ---- */
-  CRASH_T: 0.8, // s of tumble
+  CRASH_T: 1.1, // s of tumble
   CRASH_GETUP_T: 0.25, // last part of the tumble: spin settles, board comes back onto the slope
-  CRASH_KEEP: 0.85, // share of the tangential speed kept when the tumble starts
-  CRASH_SLIDE_TO: 0.6, // the sliding tumble eases toward this × cruise (never a dead stop)
+  CRASH_KEEP: 0.6, // share of the tangential speed kept when the tumble starts
+  CRASH_SLIDE_TO: 0.4, // the sliding tumble eases toward this × cruise (never a dead stop)
   CRASH_SLIDE_RATE: 2.2, // 1/s
   CRASH_THROW_VY: 420, // px/s: hitting an obstacle throws the rider up and over it
   CRASH_MIN_THROW: 0.55, // × cruise: minimum forward speed of that throw
   CRASH_SPIN: 13, // rad/s initial tumble spin
   CRASH_SPIN_DECAY: 2.2, // 1/s
-  RESPAWN_MIN_FRAC: 0.55, // × cruise: speed when getting up
+  RESPAWN_MIN_FRAC: 0.4, // × cruise: speed when getting up
   RESPAWN_INVULN: 1.0, // s immune to obstacles after getting up / being set down
   RESPAWN_CLEAR: 30, // px placed past an obstacle if the tumble ended inside it
 
