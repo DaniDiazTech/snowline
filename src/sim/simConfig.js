@@ -28,7 +28,8 @@ export const SIM = Object.freeze({
   JUMP_BUFFER: 0.15, // s a press is remembered before touching down
   COYOTE: 0.12, // s after rolling off an edge during which a press still jumps
   RAMP_ZONE_AFTER_LIP: 50, // px after a ramp lip where a jump still gets the ramp pop (rampPop(height))
-  RAMP_LAUNCH_LEAD: 6, // px: a press on a pit ramp's run-up launches this close to the lip
+  RAMP_LAUNCH_LEAD: 6, // px: a press on a ramp's run-up launches this close to the lip
+  RAMP_PRESS_LEAD_IN: 120, // px before a ramp's run-up where a press also waits for the lip (≈0.25 s at cruise; no hazards sit there)
   FLIP_MIN_AIR: 0.62, // s of air left when the torque would start: below that (a plain tap-hop) the held button only tucks — no flip
 
   /* ---- air ---- */
@@ -143,7 +144,7 @@ export const SIM = Object.freeze({
   MAX_SPEED_MULT: 1.6, // cap on scarf × boost cruise multiplier (keeps long tier-3 chains readable)
   // Catch-up assist (RiderInput.assist, 0..1, set by the race from position): a small cruise-speed
   // bonus that eases in/out slowly; applies to the cruise/terminal multiplier, never to kicks.
-  ASSIST_MAX: 0.06,
+  ASSIST_MAX: 0.08,
   ASSIST_EASE: 1.2, // 1/s
   SCARF_SPEED_BONUS: 0.03, // full scarf raises cruise speed by 3% (mostly a visible momentum / score gauge)
   SCARF_PER_POINT: 0.009, // scarf gained per banked combo point (total)

@@ -487,8 +487,9 @@ export class RiderSim {
     const finished = st.finishTick >= 0;
     const th = Math.atan(c.slopeAt(st.x));
     if (p.bufferT > 0 && !finished && !p.rampLaunch) {
-      // A press on a pit ramp's run-up launches from its lip (like a buffered press on landing).
-      const r = this._pitRampAt(st.x);
+      // A press on any ramp's run-up launches from its lip (like a buffered press on landing):
+      // an early jump would waste the ramp or come down on its rising face.
+      const r = this._rampRunupAt(st.x);
       if (r) {
         p.rampLaunch = r;
         p.bufferT = 0;
@@ -702,11 +703,11 @@ export class RiderSim {
     return 3;
   }
 
-  /** Pit ramp whose run-up contains x (pit ramps have their lip exactly on a pit's near edge). */
-  _pitRampAt(x) {
+  /** Ramp (pit ramp or standalone kicker) whose run-up, or the short lead-in before it, contains x. */
+  _rampRunupAt(x) {
     for (const r of this._ramps) {
-      if (r.x0 > x) break;
-      if (x < r.lipX - SIM.RAMP_LAUNCH_LEAD && this.course._chasmAt(r.lipX + 1)) return r;
+      if (r.x0 - SIM.RAMP_PRESS_LEAD_IN > x) break;
+      if (x < r.lipX - SIM.RAMP_LAUNCH_LEAD) return r;
     }
     return null;
   }
@@ -1170,7 +1171,9 @@ export class RiderSim {
     const p = this._p;
     const c = this.course;
     st.speed = Math.sqrt((st.vx) * (st.vx) + (st.vy) * (st.vy));
-    if (st.speed > st.stats.topSpeed) st.stats.topSpeed = st.speed;
+    // Race speed is horizontal: the vertical part of a drop is inflated by the game's strong gravity.
+    const vxAbs = st.vx < 0 ? -st.vx : st.vx;
+    if (vxAbs > st.stats.topSpeed) st.stats.topSpeed = vxAbs;
     st.progress = clamp((st.x - c.startX) / c.length, 0, 1);
     let target = 0.2;
     if (p.phys === 'air') target = held ? 1 : 0.35;

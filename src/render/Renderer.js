@@ -36,7 +36,7 @@
  */
 import { clamp, smoothstep } from '../math/utils.js';
 import { BODY_CENTER } from '../math/physics.js';
-import { RiderMode, SimEvent } from '../contracts.js';
+import { Phase, RiderMode, SimEvent } from '../contracts.js';
 import { sampleAtmosphere } from './DayCycle.js';
 import { Camera } from './Camera.js';
 import { Sky } from './Sky.js';
@@ -439,7 +439,8 @@ export class Renderer {
     this.mark('post');
     // name tags of ghosts (not on cinematic screens), staggered when their x-ranges collide;
     // then edge markers for the nearest rider off screen ahead and behind
-    if (!frame.cinematic) {
+    // (none on the results screen either: tags and markers would sit on the podium text)
+    if (!frame.cinematic && frame.phase !== Phase.RESULTS) {
       ctx.font = TAG_FONT;
       if ('letterSpacing' in ctx) ctx.letterSpacing = '1px';
       ctx.textBaseline = 'middle';

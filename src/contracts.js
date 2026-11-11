@@ -211,7 +211,7 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
  * @property {number} grindPx
  * @property {number} crashes
  * @property {number} coins
- * @property {number} topSpeed    px/s
+ * @property {number} topSpeed    px/s, horizontal (the race-relevant speed; drops add vertical speed under strong game gravity)
  */
 
 /**

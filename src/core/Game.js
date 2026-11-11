@@ -139,6 +139,9 @@ export class Game {
     this.backdropPausedAt = 0;
     this.lastBackdropDraw = 0;
     this.wakeLock = null;
+    /** display labels of the tricks in the live combo (see comboView) */
+    this.comboLabels = [];
+    this.comboViewObj = { points: 0, mult: 0, tricks: this.comboLabels };
     this.fps = { ema: 16.7, shownAt: 0, on: params.has('fps') && params.get('fps') !== '0' };
     this.spectate = null;
     this.phase = Phase.HOME;
@@ -659,6 +662,7 @@ export class Game {
 
   enterRace(race) {
     this.race = race;
+    this.comboLabels.length = 0;
     this.backdrop = null;
     this.lastResults = null;
     this.saved = 'pending';
@@ -744,6 +748,23 @@ export class Game {
     this.ui.announce(`${report.name} finished ${ordinal(place)}`, 'info');
   }
 
+  /**
+   * The combo with display labels ("Chasm Jump", "Bunting Grind ×2") instead of the sim's internal trick
+   * names, taken from the TRICK events. Reuses one object: the HUD diffs by content.
+   */
+  comboView(combo) {
+    const labels = this.comboLabels;
+    const n = combo.tricks.length;
+    if (labels.length > n) labels.splice(0, labels.length - n); // banked or lost: only the live tail counts
+    // Events dropped after a long stall leave gaps: fall back to the name, split into words.
+    while (labels.length < n) labels.unshift(combo.tricks[n - labels.length - 1].replace(/([a-z])([A-Z])/g, '$1 $2'));
+    const v = this.comboViewObj;
+    v.points = combo.points;
+    v.mult = combo.mult;
+    v.tricks = labels;
+    return v;
+  }
+
   handleEvent(event) {
     const { type, data } = event;
     this.audio.onSimEvent(event);
@@ -752,7 +773,10 @@ export class Game {
       else if (type === SimEvent.BOOST) setTimeout(() => this.hint('boost', 'Clean landing. Speed boost', 'good'), 1200);
 
     }
-    if (type === SimEvent.TRICK) this.ui.trickToast(data.label, data.points);
+    if (type === SimEvent.TRICK) {
+      this.comboLabels.push(data.label);
+      this.ui.trickToast(data.label, data.points);
+    }
     else if (type === SimEvent.COMBO) this.pendingCombo = data;
     else if (type === SimEvent.BOOST) {
       const c = this.pendingCombo;
@@ -944,7 +968,7 @@ export class Game {
     }
     const gaps = race.gaps(rows);
     this.spectateFrame(now, race, others);
-    this.renderer.draw({ timeMs: race.timeMs, dtMs, local, others, events, phase: this.phase, cinematic: false, markers: this.offscreenMarkers(gaps, others), focusId: this.focusId ?? undefined });
+    this.renderer.draw({ timeMs: race.timeMs, dtMs, local, others, events, phase: this.phase, cinematic: false, markers: this.phase === Phase.RESULTS ? undefined : this.offscreenMarkers(gaps, others), focusId: this.focusId ?? undefined });
 
     const s = race.state;
     const atm = this.renderer.atmosphere;
@@ -956,7 +980,7 @@ export class Game {
       this.ui.setTrickAnchor(anchor.x, anchor.y);
       this.ui.updateHud({
         timeMs: race.finished ? s.finishTick * TICK_MS : race.timeMs,
-        speedMps: s.speed / PX_PER_M,
+        speedMps: Math.abs(s.vx) / PX_PER_M, // horizontal: what gets you down the mountain
         progress: s.progress,
         position: race.position(rows),
         total: rows.length,
@@ -965,7 +989,7 @@ export class Game {
         boostLevel: s.boostT > 0 ? s.boostLevel : 0,
         hoverT: s.hoverT,
         magnetT: s.magnetT,
-        combo: s.combo,
+        combo: this.comboView(s.combo),
         racers: rows,
         gaps,
         tailwind: !race.finished && race.localAssist > 0.3,
