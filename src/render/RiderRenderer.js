@@ -95,8 +95,10 @@ export class RiderRenderer {
     // landing: knees absorb — deeper and a little longer for heavier impacts, no overshoot
     const la = vs ? vs.landAge : 9;
     const lk = vs ? vs.landK : 0;
-    const squash = la < 0.9 ? lk * (la < 0.06 ? la / 0.06 : Math.exp(-(la - 0.06) / (0.11 + 0.16 * lk))) : 0;
-    c = c + squash * 0.75;
+    const squash = la < 1.2 ? lk * (la < 0.06 ? la / 0.06 : Math.exp(-(la - 0.06) / (0.2 + 0.3 * lk))) : 0;
+    c = c + squash * 0.95;
+    // the landing slide: for about half a second the rear hand drags in the snow (read at game scale)
+    const slide = mode === RiderMode.GROUND && la < 0.55 ? Math.min(1, lk * 1.4) * (1 - la / 0.55) : 0;
     // take-off: a quick compress carried into a spring/extension (legs straighten)
     const tk = vs ? vs.takeoffAge : 9;
     if (air && tk < 0.24) c += tk < 0.05 ? 0.45 * (1 - tk / 0.05) : -0.25 * Math.sin((Math.PI * (tk - 0.05)) / 0.19);
@@ -185,12 +187,29 @@ export class RiderRenderer {
       a1y = lerp(7, 9, c);
       a2x = lerp(10, 9, c);
       a2y = lerp(5, 8, c);
+      if (slide > 0) {
+        // landing slide: rear hand reaches back to the snow, front arm out for balance
+        a1x = lerp(a1x, J.h.x - J.n.x - 11, slide);
+        a1y = lerp(a1y, J.h.y - J.n.y + 6, slide);
+        a2x = lerp(a2x, 12, slide);
+        a2y = lerp(a2y, -2, slide);
+      }
     }
     set(J.a1, J.n.x + a1x, J.n.y + 1 + a1y);
     set(J.a2, J.n.x + a2x, J.n.y + 1 + a2y);
     // elbows: halfway, pushed down/out a little
     set(J.e1, (J.n.x + J.a1.x) / 2 - 1, (J.n.y + J.a1.y) / 2 + 2.2);
     set(J.e2, (J.n.x + J.a2.x) / 2 + 1, (J.n.y + J.a2.y) / 2 + 2.2);
+    // crash: after the first tumble the rider slides down on their back — hip on the snow, torso
+    // reclined, knees up, one hand dragging, the other thrown up (board-local; the board follows the slope)
+    const sb = crashed && vs ? vs.crashSlide : 0;
+    if (sb > 0) {
+      const wob = Math.sin(t * 7) * 0.8;
+      for (const [k, x, y] of CRASH_SLIDE_POSE) {
+        J[k].x = lerp(J[k].x, x + (k === 'a2' || k === 'e2' ? wob : 0), sb);
+        J[k].y = lerp(J[k].y, y + (k === 'hd' ? wob * 0.4 : 0), sb);
+      }
+    }
     return J;
   }
 
@@ -204,7 +223,7 @@ export class RiderRenderer {
   visOf(v) {
     let vs = this.vis.get(v.id);
     if (!vs) {
-      vs = { a: v.angle, prevTarget: v.angle, prevRaw: v.angle, omega: 0, rot: 0, tuck: 0, takeoffAge: 9, baseA: v.angle, airW: 0, j: null, lift: 0, landAge: 9, landK: 0, wobbleAge: 9, prevMode: v.mode, prevVy: v.vy, rescueAge: 9, seen: 0 };
+      vs = { a: v.angle, prevTarget: v.angle, prevRaw: v.angle, omega: 0, rot: 0, tuck: 0, takeoffAge: 9, baseA: v.angle, airW: 0, j: null, lift: 0, landAge: 9, landK: 0, wobbleAge: 9, crashAge: 9, crashSlide: 0, prevMode: v.mode, prevVy: v.vy, rescueAge: 9, seen: 0 };
       this.vis.set(v.id, vs);
     }
     return vs;
@@ -243,6 +262,11 @@ export class RiderRenderer {
       vs.landAge = 0;
       vs.landK = clamp((vs.prevVy - 250) / 900, 0.2, 0.9);
     }
+    if (mode === RiderMode.CRASHED) {
+      if (vs.prevMode !== RiderMode.CRASHED) vs.crashAge = 0;
+      else vs.crashAge += dt;
+    } else vs.crashAge = 9;
+    vs.crashSlide = mode === RiderMode.CRASHED ? smooth(0.2, 0.42, vs.crashAge) : 0;
     if (mode === RiderMode.RESCUE) {
       if (vs.prevMode !== RiderMode.RESCUE) vs.rescueAge = 0;
       else vs.rescueAge += dt;
@@ -297,6 +321,11 @@ export class RiderRenderer {
     // and ease away any jump (snap to the slope at touchdown, mode changes) over ~70 ms
     let target = v.angle;
     if (mode === RiderMode.RESCUE) target = 0.22 + Math.sin(t * 1.7 + 0.5) * 0.12;
+    if (vs.crashSlide > 0 && this.groundAt) {
+      // sliding on the back: the board lies along the slope instead of following the tumble spin
+      const along = Math.atan((this.groundAt(v.x + 10) - this.groundAt(v.x - 10)) / 20);
+      target = v.angle + wrapAngle(along - v.angle) * vs.crashSlide;
+    }
     let dTarget = wrapAngle(target - vs.prevTarget);
     if (Math.abs(dTarget) > 0.6) dTarget = 0; // a jump, not a spin: let the easing handle it
     vs.a += dTarget;
@@ -816,6 +845,18 @@ function smooth(e0, e1, x) {
 }
 
 const JOINTS = ['f1', 'f2', 'k1', 'k2', 'h', 'n', 'hd', 'e1', 'e2', 'a1', 'a2'];
+/** Sliding on the back after a crash (board-local joints; y up is negative, the board is at y ≈ 0). */
+const CRASH_SLIDE_POSE = [
+  ['h', -5, -4],
+  ['k1', 0, -11],
+  ['k2', 5, -10],
+  ['n', -16, -7],
+  ['hd', -21.5, -9],
+  ['e1', -19, -2.5],
+  ['a1', -24, 0],
+  ['e2', -12, -12],
+  ['a2', -8, -18],
+];
 /* contact probes (board-local, unscaled): [x, y, extra radius] triples; 999 = joint index */
 const CONTACT_BOARD = [-17, 0, 0, 17, 0, 0, -12, 0, 0, 12, 0, 0];
 const CONTACT_JOINTS = ['hd', 'h', 'k1', 'k2', 'a1', 'a2', 'n'];

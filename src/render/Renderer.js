@@ -5,9 +5,9 @@
  *   sky gradient · stars · sun/moon · high clouds · lightning sky flash
  *   5 ridge layers (cached tinted strips) with valley mist + clouds between
  *   back decor (depth > 0) · snow body (gradient follows the surface) · chasms · lip
- *   features · decor on the line · warm glows (additive)
+ *   features · decor on the line · warm glows (additive) · front decor (depth < 0: never over a rider)
  *   ghosts · local rider (last) · particles · pickups
- *   front decor (depth < 0) · fog · huge foreground pines · precipitation
+ *   fog · huge foreground pines · precipitation
  *   boost streaks / warmth · vignette · lightning white-out · name tags
  *
  * Everything ambient runs off frame.timeMs so clients (and screenshots) agree.
@@ -26,6 +26,8 @@
  *   fog bands, vignette, background resolution) to hold ~60 fps, with hysteresis: it steps down
  *   after ~0.7 s over budget, up only after ~4 s with headroom, and backs off from a level that
  *   failed (10 s, doubling). It starts conservatively at density min(devicePixelRatio, 1.5).
+ *   Below 'medium-1x' it only steps when frames take more than twice their budget (no GPU canvas),
+ *   and the background buffer never drops below half resolution.
  *   renderer.setFrameInterval(ms)  the frame budget the caller is drawing at (default 16.7; e.g. 33.3
  *                                  for a 30 fps menu backdrop): the governor steps down above ~1.17×
  *                                  that budget and up below ~1.03× with draw-time headroom.
@@ -65,6 +67,8 @@ export const QUALITY_LEVELS = Object.freeze([
   { name: 'minimal', dens: 0.6, bg: 0.35, particles: 0.25, fg: false, weather: 0.25, vignette: false, fog: false, cols: 32 },
 ]);
 const MODE_LEVEL = { high: 0, medium: 2, low: 4 };
+/** First level the governor only steps into when frames take more than twice their budget. */
+const COARSE_LEVEL = 3;
 /** Fonts are set once per pass (assigning ctx.font is a style parse each time). */
 const BOARD_FONT = '800 15px system-ui, -apple-system, "Segoe UI", sans-serif';
 const TAG_FONT = '600 10px system-ui, -apple-system, "Segoe UI", sans-serif';
@@ -193,7 +197,10 @@ export class Renderer {
     const max = QUALITY_LEVELS.length - 1;
     if (this.qMode === 'auto' && g.since > 700) {
       const budget = this.frameBudget || 16.7;
-      if (g.ft > budget * 1.17 && this.level < max) {
+      // Below 'medium-1x' the picture gets visibly coarse: only go there when frames take more than
+      // twice their budget (a machine without GPU canvas), never for a busy-but-capable one.
+      const severe = g.ft > budget * 2;
+      if (g.ft > budget * 1.17 && this.level < max && (this.level < COARSE_LEVEL || severe)) {
         // over budget: step down, and keep away from the failed level for a while (doubling)
         g.blocked[this.level] = now + g.backoff;
         g.backoff = Math.min(60000, g.backoff * 2);
@@ -301,7 +308,8 @@ export class Renderer {
 
     this.mark('start');
     // ---- background (into the reduced-resolution buffer) ----
-    const bs = Math.min(1, this.dpr) * Qy.bg;
+    // never below half resolution: lower than that the sky and ridges turn into visible blocks
+    const bs = Math.max(0.5, Math.min(1, this.dpr) * Qy.bg);
     sizeCanvas(this.bg, w * bs, h * bs);
     const bctx = this.bgCtx;
     bctx.setTransform(this.bg.width / w, 0, 0, this.bg.height / h, 0, 0);
@@ -350,7 +358,9 @@ export class Renderer {
       bctx.fillRect(0, y0, w, h - y0);
     }
     // blit the background buffer once, upscaled
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(this.bg, 0, 0, this.bg.width, this.bg.height, 0, 0, w, h);
+    ctx.imageSmoothingQuality = 'low';
 
     this.mark('haze');
     // ---- slope ----
@@ -395,6 +405,10 @@ export class Renderer {
     this.drawGlows(ctx);
     this.glows.n = 0;
 
+    // front-layer decor (bigger, darker, nearer the camera) still goes behind the riders: a tree
+    // must never hide a rider, least of all mid-crash
+    for (const d of decor) if ((d.depth || 0) < 0 && !this.boardXs.some((bx) => Math.abs(bx - d.x) < 160)) this.decor.draw(ctx, d, P, course);
+
     this.mark('features');
     // ---- riders & effects ----
     this.emitContinuous(frame, dt, P, feats);
@@ -417,7 +431,6 @@ export class Renderer {
     this.drawGlows(ctx);
     this.glows.n = 0;
     this.mark('particles');
-    for (const d of decor) if ((d.depth || 0) < 0 && !this.boardXs.some((bx) => Math.abs(bx - d.x) < 160)) this.decor.draw(ctx, d, P, course);
     this.drawGlows(ctx);
     this.glows.n = 0;
     this.riders.sweep();
@@ -1119,13 +1132,16 @@ export class Renderer {
         if (gx < -100 || gx > this.width + 100) continue;
       }
       if (v.mode === RiderMode.GROUND && sp > 60) {
-        const rate = clamp(sp / 900, 0, 1.6) * (local ? 110 * (1 + 0.6 * (v.boostLevel || 0)) : 22);
+        // right after a landing the board skids: a much denser spray, flung higher (the landing slide)
+        const vis = this.riders.vis.get(v.id);
+        const skid = vis && vis.landAge < 0.55 ? Math.min(1, vis.landK * 1.4) * (1 - vis.landAge / 0.55) : 0;
+        const rate = clamp(sp / 900, 0, 1.6) * (local ? 110 * (1 + 0.6 * (v.boostLevel || 0)) : 22) * (1 + 4 * skid);
         em.spray += rate * dt;
         const tx = v.x - ca * 13;
         const ty = v.y - sa * 13;
         while (em.spray >= 1) {
           em.spray -= 1;
-          ps.spawn(PK.PUFF, tx + ps.rand(-3, 3), ty - ps.rand(0, 3), -v.vx * ps.rand(0.05, 0.25) + ps.rand(-30, 30), -ps.rand(40, 140) * clamp(sp / 700, 0.4, 1.5), ps.rand(0.3, 0.7), ps.rand(1.1, 2.8) * (0.8 + sp / 1600), 0, 240, 3.2);
+          ps.spawn(PK.PUFF, tx + ps.rand(-3, 3), ty - ps.rand(0, 3), -v.vx * ps.rand(0.05, 0.25) + ps.rand(-30, 30), -ps.rand(40, 140) * clamp(sp / 700, 0.4, 1.5) * (1 + 0.8 * skid), ps.rand(0.3, 0.7) * (1 + 0.5 * skid), ps.rand(1.1, 2.8) * (0.8 + sp / 1600) * (1 + 0.4 * skid), 0, 240, 3.2);
         }
       }
       if (v.mode === RiderMode.CRASHED && sp > 40) {

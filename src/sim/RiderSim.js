@@ -106,8 +106,6 @@ function freshPrivate() {
     lineChain: 0, // lines caught in the current chain (reset on plain snow)
     assistTarget: 0, // RiderInput.assist of the last tick (0..1)
     assistEff: 0, // eased assist actually applied
-    spinChecked: false, // this air phase's "is there time to flip?" check was done
-    spinBlocked: false, // ...and it said no: a held button keeps the board level instead
     landSquash: 0,
     hoverOff: 0,
   };
@@ -396,8 +394,6 @@ export class RiderSim {
     p.jumped = jumped;
     p.coyoteT = jumped ? 0 : SIM.COYOTE;
     p.takeoffAngle = st.angle;
-    p.spinChecked = false;
-    p.spinBlocked = false;
     p.flipMinClear = Infinity;
     p.bigAirDone = false;
     st.airTime = 0;
@@ -585,13 +581,8 @@ export class RiderSim {
     // Rotation with weight: after HOLD_T of continuous hold a torque winds the spin up (capped);
     // released, the spin carries on and decays; near upright a gentle righting torque acts.
     const under = Math.atan(c.slopeAt(st.x));
-    let torque = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
-    if (torque > 0 && !p.spinChecked) {
-      // A plain tap-hop has no room for a flip: the held button only tucks.
-      p.spinChecked = true;
-      p.spinBlocked = this._timeToGround() < SIM.FLIP_MIN_AIR;
-    }
-    if (p.spinBlocked) torque = 0;
+    // Any jump can carry a flip: holding too long or too short off a small one is the player's risk.
+    const torque = held ? smoothstep(SIM.HOLD_T, SIM.HOLD_T + SIM.FLIP_RAMP_T, p.holdT) : 0;
     const rel0 = wrapAngle(st.angle - under);
     if (torque > 0) {
       st.angVel = Math.max(-SIM.FLIP_MAX_RATE, st.angVel - SIM.FLIP_TORQUE * torque * dt);
@@ -688,19 +679,6 @@ export class RiderSim {
     if (phi < SIM.COMMIT_ANGLE) return SIM.RISKY_DAMP;
     if (phi < TAU - SIM.OPEN_ZONE) return SIM.TUCK_DAMP;
     return SIM.OPEN_DAMP;
-  }
-
-  /** Ballistic time until the rider would touch the snow (or 3 s), ignoring drag. */
-  _timeToGround() {
-    const st = this.state;
-    const g = GRAVITY * (st.hoverT > 0 ? SIM.HOVER_GRAVITY : 1);
-    const h = 1 / 30;
-    for (let t = h; t < 3; t += h) {
-      const x = st.x + st.vx * t;
-      const y = st.y + st.vy * t + 0.5 * g * t * t;
-      if (!this.course._chasmAt(x) && y >= this._surf(x)) return t;
-    }
-    return 3;
   }
 
   /** Ramp (pit ramp or standalone kicker) whose run-up, or the short lead-in before it, contains x. */

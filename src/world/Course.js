@@ -66,18 +66,18 @@ export const COURSE = Object.freeze({
   PIT_NARROW: [80, 120], // crevasse: any jump clears it
   PIT_MEDIUM: [220, 270], // riding off the ramp at cruise is not enough: jump
   PIT_WIDE: [300, 345], // gorge: jump from the ramp (or boost speed); + up to 25 px with difficulty
-  RAMP_H_NARROW: [25, 35],
-  RAMP_H_MEDIUM: [45, 60],
-  RAMP_H_WIDE: [72, 88],
-  RAMP_LIP_DEG: [14, 24], // lip angle above the approach slope
-  KICKER_H: [45, 65], // standalone ramps on open slopes
+  RAMP_H_NARROW: [18, 26],
+  RAMP_H_MEDIUM: [28, 38],
+  RAMP_H_WIDE: [36, 46],
+  RAMP_LIP_DEG: [10, 16], // lip angle above the approach slope
+  KICKER_H: [32, 44], // standalone ramps on open slopes
   LANDING_SLOPE: [0.45, 0.55], // downslope after a pit / kicker that receives the jump arc (≈ 24-29°)
   LANDING_LEN: 500, // px of steep landing hill…
   GORGE_LANDING_SLOPE: [0.72, 0.82], // wide gorges: steep landing hill (≈ 36-39°) — big air, doubles at speed
   GORGE_LANDING_LEN: 650,
   RUNOUT_SLOPE: 0.1, // …then a gentle run-out that bleeds the landing speed off
   RUNOUT_LEN: 700,
-  CLEAR_AFTER_AIR: 1500,
+  CLEAR_AFTER_AIR: 2000,
   FINALE_FRAC: 0.08, // the last ~8% of the course is a set-piece finale…
   FINALE_MIN: 4600, // …but at least this long (px) // px after a big-air landing zone with no obstacle / set piece
   INRUN_SLOPE: [0.28, 0.34], // approach under a ramp: descends about as fast as the scoop rises
@@ -250,7 +250,7 @@ export function generateCourse(seed, settings) {
     if (variant === 0) {
       const a = twoLines(planPiece(rngLayout, 'bunting', fx, 1));
       const k = planPiece(rngLayout, 'kicker', a.x1 + 200, 1);
-      k.rampH = rngLayout.range(68, 78);
+      k.rampH = rngLayout.range(44, 52);
       k.rampLen = (2 * k.rampH) / Math.tan(k.lipAngle);
       k.lipX = k.x0 + 250 + k.rampLen;
       k.x1 = k.lipX + 1.6 * k.rampH + COURSE.LANDING_LEN + COURSE.RUNOUT_LEN;
@@ -656,7 +656,9 @@ export function generateCourse(seed, settings) {
               g.sag = Math.max(0, g.sag - (52 - minClear) - 1);
             }
             // Some lines are the smart route over a hazard: spikes or a pair of snowmen underneath.
-            if (!p.noHazards && rngFeat.chance(0.35) && x1 - x0 > 300) {
+            // Only the first line of a chain: riders reach it from the ground with fair warning, never
+            // by dropping off the line before it straight onto the hazard.
+            if (i === 0 && !p.noHazards && rngFeat.chance(0.35) && x1 - x0 > 300) {
               const mid = (x0 + x1) / 2;
               if (rngFeat.chance(0.5)) addObstacle('spikes', mid, d, true);
               else {
@@ -953,7 +955,7 @@ function planPiece(rng, type, x, d) {
       p.spans = [];
       let len = 120;
       for (let i = 0; i < count; i++) {
-        const span = isRoof ? rng.range(150, 230) : rng.range(260, 560);
+        const span = isRoof ? rng.range(190, 260) : rng.range(260, 560);
         const gap = isRoof ? rng.range(90, 170) : rng.range(110, 200);
         p.spans.push([span, gap]);
         len += span + gap;

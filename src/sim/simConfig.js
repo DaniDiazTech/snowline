@@ -30,7 +30,6 @@ export const SIM = Object.freeze({
   RAMP_ZONE_AFTER_LIP: 50, // px after a ramp lip where a jump still gets the ramp pop (rampPop(height))
   RAMP_LAUNCH_LEAD: 6, // px: a press on a ramp's run-up launches this close to the lip
   RAMP_PRESS_LEAD_IN: 120, // px before a ramp's run-up where a press also waits for the lip (≈0.25 s at cruise; no hazards sit there)
-  FLIP_MIN_AIR: 0.62, // s of air left when the torque would start: below that (a plain tap-hop) the held button only tucks — no flip
 
   /* ---- air ---- */
   // Ground resistance k·v² = aero (≈45%) + snow friction (≈55%). In the air only the aero part acts,
@@ -40,8 +39,8 @@ export const SIM = Object.freeze({
   // lets angular momentum carry on and decay; a gentle righting torque acts only near upright.
   HOLD_T: 0.16, // s the button must be held continuously before any torque (a tap = a plain jump, zero rotation)
   FLIP_RAMP_T: 0.06, // s over which the torque ramps in once HOLD_T is reached
-  FLIP_TORQUE: 34, // rad/s² of backward angular acceleration while held (the wind-up)
-  FLIP_MAX_RATE: 9.5, // rad/s cap on the spin (≈ 545°/s) → a held 360° takes ≈ 1.0 s
+  FLIP_TORQUE: 70, // rad/s² of backward angular acceleration while held (the wind-up)
+  FLIP_MAX_RATE: 13, // rad/s cap on the spin (≈ 545°/s) → a held 360° takes ≈ 1.0 s
   // Released, angular momentum is conserved; the rider changes the spin rate by tucking / extending,
   // depending on where the board is in its rotation (φ = back-rotation past the last upright):
   //   φ < EXTEND_ZONE            extended: the spin slows strongly (and the righting spring acts)
@@ -51,7 +50,7 @@ export const SIM = Object.freeze({
   EXTEND_ZONE: (120 * Math.PI) / 180,
   COMMIT_ANGLE: (160 * Math.PI) / 180,
   OPEN_ZONE: (85 * Math.PI) / 180,
-  EXTEND_DAMP: 14, // 1/s
+  EXTEND_DAMP: 30, // 1/s
   RISKY_DAMP: 5, // 1/s
   TUCK_DAMP: 0.3, // 1/s
   OPEN_DAMP: 7, // 1/s

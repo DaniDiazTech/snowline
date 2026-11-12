@@ -11,16 +11,17 @@
  * Units: world px, seconds. y grows DOWN.
  */
 
-/** Gravity, px/s² (≈ 8 g at PX_PER_M = 24: heavy, snappy arcs). A tap jump is a quick ~0.6 s hop. */
-export const GRAVITY = 1900;
+/** Gravity, px/s² (≈ 6 g at PX_PER_M = 24: snappy arcs). A tap jump lasts ~0.85 s: just enough for a well-timed backflip. */
+export const GRAVITY = 1500;
 
 /**
  * Vertical take-off impulse of a jump, px/s (applied as vy -= JUMP_VY).
  * On a constant slope the airtime of a vertical impulse is 2·JUMP_VY/GRAVITY
- * whatever the slope angle (≈0.63 s), and the highest point above the snow is
- * JUMP_VY²/(2·GRAVITY) ≈ 95 px (4 m) — too little air for a flip; flips come from ramps, drops, bounces, so grind lines 55-90 px high are reachable.
+ * whatever the slope angle (≈0.88 s), and the highest point above the snow is
+ * JUMP_VY²/(2·GRAVITY) ≈ 145 px (6 m): room for one backflip if it is held and released at the right
+ * time (hold too long and the rider is still spinning at touchdown); grind lines 55-90 px high are reachable.
  */
-export const JUMP_VY = 600;
+export const JUMP_VY = 660;
 
 /**
  * Reference slope (dy/dx) at which an unboosted rider cruises at REF_SPEED.
@@ -44,9 +45,9 @@ export function terminalSpeed(slope) {
 export const RAMP_POP = 440;
 
 /** Extra upward kick (px/s) of a jump taken on a ramp of the given height: taller ramps launch higher. */
-export const RAMP_POP_PER_PX = 10;
+export const RAMP_POP_PER_PX = 4;
 export function rampPop(height) {
-  return Math.max(160, Math.min(880, RAMP_POP_PER_PX * height));
+  return Math.max(60, Math.min(180, RAMP_POP_PER_PX * height));
 }
 
 /** Height of the rider's body centre above the board contact point, px (pickups). */
