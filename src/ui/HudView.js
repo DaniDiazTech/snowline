@@ -49,12 +49,24 @@ export class HudView {
     this.posWrap = h('span', { class: 'hud-pos', 'data-testid': 'hud-position', 'aria-label': 'Position' }, this.posEl, this.totalEl);
     // under the plaque: nearest rider ahead / behind, in seconds
     this.gapEl = h('span', { class: 'hud-gaps', 'data-testid': 'hud-gaps', 'aria-hidden': 'true' });
+    // points: banked tricks + coins (their own contest next to the time), with the coin count
+    this.scoreEl = h('b', {}, '0');
+    this.coinEl = h('span', {}, '0');
+    this.scoreCell = h(
+      'span',
+      { class: 'plaque__cell hud-score', 'data-testid': 'hud-score', 'aria-label': 'Points' },
+      icon(ICONS.star, 'icon plaque__icon'),
+      this.scoreEl,
+      h('span', { class: 'hud-coins', 'data-testid': 'hud-coins', 'aria-label': 'Coins' }, icon(ICONS.coin, 'icon'), this.coinEl)
+    );
     this.plaque = h(
       'div',
       { class: 'plaque' },
       h('span', { class: 'plaque__cell' }, icon(ICONS.clock, 'icon plaque__icon'), this.timeEl),
       h('span', { class: 'plaque__sep', 'aria-hidden': 'true' }),
-      h('span', { class: 'plaque__cell' }, icon(ICONS.podium, 'icon plaque__icon'), this.posWrap)
+      h('span', { class: 'plaque__cell' }, icon(ICONS.podium, 'icon plaque__icon'), this.posWrap),
+      h('span', { class: 'plaque__sep', 'aria-hidden': 'true' }),
+      this.scoreCell
     );
     const tl = h('div', { class: 'hud__tl' }, this.plaque, this.gapEl);
 
@@ -161,6 +173,15 @@ export class HudView {
     const total = hud.total > 0 ? `/${hud.total}` : '';
     setText(this.posEl, pos);
     setText(this.totalEl, total);
+
+    // points + coins: a short pop when points land
+    const score = Math.round(hud.score || 0);
+    if (c.score !== score) {
+      if (c.score !== undefined && score > c.score) replay(this.scoreCell, 'pop');
+      c.score = score;
+      this.scoreEl.textContent = score.toLocaleString('en-US');
+    }
+    setText(this.coinEl, String(hud.coins || 0));
 
     // progress (local fill)
     const prog = clamp01(hud.progress);

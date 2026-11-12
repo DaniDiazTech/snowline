@@ -1132,8 +1132,8 @@ export class RiderSim {
         st.stats.coins++;
         st.scarf = Math.min(1, st.scarf + SIM.SCARF_PER_COIN);
         p.kickLeft += TRICKS.COIN_KICK;
-        if (p.phys === 'air' || p.phys === 'grind') st.combo.points += TRICKS.COIN;
-        else st.stats.score += TRICKS.COIN;
+        // coins are score, not combo: they never change the boost tier
+        st.stats.score += TRICKS.COIN;
       } else if (f.kind === PickupKind.FEATHER) {
         st.hoverT = SIM.HOVER_T;
       } else if (f.kind === PickupKind.MAGNET) {

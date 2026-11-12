@@ -78,6 +78,14 @@ export const COURSE = Object.freeze({
   RUNOUT_SLOPE: 0.1, // …then a gentle run-out that bleeds the landing speed off
   RUNOUT_LEN: 700,
   CLEAR_AFTER_AIR: 2000,
+  // Drops (Alto's big natural jumps): a long steep descent builds speed and announces the jump,
+  // a rounded crest flattens into a lip, then a long steep landing hill receives the arc.
+  DROPS: { sprint: 2, classic: 3, marathon: 4 }, // guaranteed per course (more by chance)
+  DROP_RUN: [1400, 2200], // px of descent before the crest
+  DROP_RUN_SLOPE: [0.38, 0.5], // ≈ 21-27°
+  DROP_LIP_SLOPE: -0.03, // the lip kicks up a touch: a jump there leaves the snow cleanly
+  DROP_LEN: [750, 1100], // px of landing hill
+  DROP_SLOPE: [0.62, 0.85], // ≈ 32-40°: the steepest give room for a double at boost speed
   FINALE_FRAC: 0.08, // the last ~8% of the course is a set-piece finale…
   FINALE_MIN: 4600, // …but at least this long (px) // px after a big-air landing zone with no obstacle / set piece
   INRUN_SLOPE: [0.28, 0.34], // approach under a ramp: descends about as fast as the scoop rises
@@ -106,10 +114,10 @@ const BIOMES = ['slopes', 'forest', 'village', 'ridge'];
 
 /** Set-piece weights per biome. */
 const PIECE_WEIGHTS = {
-  slopes: { kicker: 5, obstacles: 2.5, bunting: 3, chasm: 0.8, drop: 1.5, ice: 1 },
-  forest: { obstacles: 3, kicker: 3.5, bunting: 3.5, drop: 1, campfire: 0.8, chasm: 0.6 },
+  slopes: { kicker: 4, obstacles: 2.5, bunting: 3, chasm: 0.8, drop: 5, ice: 1 },
+  forest: { obstacles: 3, kicker: 3, bunting: 3.5, drop: 3.5, campfire: 0.8, chasm: 0.6 },
   village: { roofs: 3, bunting: 3.5, kicker: 2, campfire: 1, ice: 1 },
-  ridge: { chasm: 2, drop: 2, obstacles: 2.5, kicker: 3, bunting: 1.5 },
+  ridge: { chasm: 2, drop: 5, obstacles: 2.5, kicker: 2.5, bunting: 1.5 },
 };
 
 /**
@@ -191,6 +199,12 @@ export function generateCourse(seed, settings) {
     const firstPit = rngLayout.range(0.08, 0.2);
     const pitAt = [];
     for (let k = 0; k < pitCount; k++) pitAt.push(firstPit + (k * (0.9 - firstPit)) / Math.max(1, pitCount - 1) + (k ? rngLayout.range(-0.03, 0.03) : 0));
+    // Drop schedule: every course gets its long descents into a big jump (more can come up by chance).
+    const dropCount = COURSE.DROPS[set.length] || COURSE.DROPS.classic;
+    const dropAt = [];
+    // (after the first pit, so a long descent never pushes the first pit late)
+    const dropFrom = firstPit + 0.1;
+    for (let k = 0; k < dropCount; k++) dropAt.push(dropFrom + ((k + 0.5) * (0.86 - dropFrom)) / dropCount + rngLayout.range(-0.03, 0.03));
     while (true) {
       const biome = biomeAt(x);
       const d = progressOf(x);
@@ -198,7 +212,12 @@ export function generateCourse(seed, settings) {
       if (pitAt.length && d >= pitAt[0]) {
         type = 'chasm';
         while (pitAt.length && d >= pitAt[0]) pitAt.shift();
-      }
+      } else if (dropAt.length && d >= dropAt[0]) {
+        type = 'drop';
+        while (dropAt.length && d >= dropAt[0]) dropAt.shift();
+      } else if (type === 'drop' && pitAt.length && pitAt[0] - d < 0.2) {
+        type = 'kicker'; // a drop is long: never let one push a due pit late
+      } else if (type === 'drop') dropAt.shift(); // a drop by chance counts toward the schedule
       const piece = planPiece(rngLayout, type, x, d);
       if (piece.x1 > finaleStart - (piece.bigAir ? COURSE.CLEAR_AFTER_AIR : 600)) break; // the finale starts on time
       pieces.push(piece);
@@ -362,15 +381,15 @@ export function generateCourse(seed, settings) {
         flatten(p.x0, p.x1, 200, 0.1, 0.32, 0.35);
         break;
       case 'drop': {
-        const { dropX, lipLen, dropLen, steep } = p;
-        shapeSlope(dropX - lipLen, dropX + dropLen, 160, (x) => lerp(0.05, steep, smoothstep(dropX - 28, dropX + 28, x)));
-        if (p.rise) {
-          const rx = dropX + dropLen + 520;
-          for (let i = idx(rx - 120); i <= idx(rx + 120); i++) {
-            const u = (sx(i) - rx) / 120;
-            slope[i] -= 0.27 * 0.5 * (1 + Math.cos(Math.PI * u));
-          }
-        }
+        // A long steep descent that builds speed and announces the jump, a rounded crest that
+        // flattens into a lip, then a long steep landing hill: jump at the crest for big air.
+        const { dropX, lipLen, dropLen, steep, runLen, runSteep } = p;
+        const crest = dropX - lipLen;
+        shapeSlope(dropX - lipLen - runLen, dropX + dropLen, 200, (x) => {
+          if (x < crest) return runSteep;
+          if (x < dropX) return lerp(runSteep, COURSE.DROP_LIP_SLOPE, smoothstep(crest, crest + 180, x));
+          return lerp(COURSE.DROP_LIP_SLOPE, steep, smoothstep(dropX, dropX + 80, x));
+        });
         break;
       }
     }
@@ -851,6 +870,7 @@ export function generateCourse(seed, settings) {
     _baseSlopeAt: baseSlopeAt,
     _chasmAt: chasmAt,
     _chasms: Object.freeze(chasms),
+    _drops: Object.freeze(pieces.filter((p) => p.type === 'drop').map((p) => Object.freeze({ runX0: p.dropX - p.lipLen - p.runLen, crestX: p.dropX - p.lipLen, lipX: p.dropX, landX1: p.dropX + p.dropLen, steep: p.steep }))),
     _biomeAt: biomeAt,
     _extent: extent,
     _featuresInto: featuresInto,
@@ -968,13 +988,14 @@ function planPiece(rng, type, x, d) {
       p.x1 = x + rng.range(500, 850);
       break;
     case 'drop':
-      p.lipLen = 220;
-      p.dropLen = rng.range(280, 470);
-      p.steep = rng.range(0.5, 0.68);
-      p.dropX = x + 200 + p.lipLen;
-      p.rise = rng.chance(0.5);
+      p.runLen = rng.range(COURSE.DROP_RUN[0], COURSE.DROP_RUN[1]);
+      p.runSteep = rng.range(COURSE.DROP_RUN_SLOPE[0], COURSE.DROP_RUN_SLOPE[1]);
+      p.lipLen = 260;
+      p.dropLen = rng.range(COURSE.DROP_LEN[0], COURSE.DROP_LEN[1]);
+      p.steep = rng.range(COURSE.DROP_SLOPE[0], COURSE.DROP_SLOPE[1]);
+      p.dropX = x + 200 + p.runLen + p.lipLen;
       p.bigAir = true;
-      p.x1 = p.dropX + p.dropLen + 950;
+      p.x1 = p.dropX + p.dropLen + 700;
       break;
   }
   return p;

@@ -38,6 +38,19 @@ const NAME_MAX = 14;
 /** Display names: no control / zero-width characters, single spaces, at most 14 characters. */
 const cleanName = (raw) =>
   [...String(raw ?? '').normalize('NFC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, '').replace(/\s+/g, ' ').replace(/^\s+/, '')].slice(0, NAME_MAX).join('');
+/** What a power-up does, said once when it is picked up. */
+const POWER_NAMES = {
+  feather: 'Feather. You float over the snow for a few seconds',
+  magnet: 'Magnet. Coins come to you for a few seconds',
+};
+
+/** The highest-scoring rider of a ranking (for the hall of fame's "Top scores"). */
+function topScorer(rows) {
+  let top = null;
+  for (const r of rows) if (Number.isFinite(r.stats?.score) && (!top || r.stats.score > top.stats.score)) top = r;
+  return top ? { name: top.name, colorIndex: top.colorIndex, score: Math.round(top.stats.score) } : undefined;
+}
+
 const ORDINALS = ['1st', '2nd', '3rd'];
 const ordinal = (n) => ORDINALS[n - 1] ?? `${n}th`;
 
@@ -783,6 +796,7 @@ export class Game {
       this.ui.comboBanked(c?.total ?? 0, c?.mult ?? 1, data.level);
       this.pendingCombo = null;
     } else if (type === SimEvent.RESCUE_START) this.ui.announce('Fell in. The balloon costs you 3 s', 'bad');
+    else if (type === SimEvent.PICKUP && POWER_NAMES[data?.kind]) this.ui.announce(POWER_NAMES[data.kind], 'good');
     else if (type === SimEvent.CRASH && CRASH_REASONS[data?.cause]) this.ui.crashLabel?.(CRASH_REASONS[data.cause]);
     else if (type === SimEvent.LAND && data?.sketchy && performance.now() - this.lastSketchyMs > 4000) {
       this.lastSketchyMs = performance.now();
@@ -832,6 +846,7 @@ export class Game {
         length: results.settings.length,
         players: humans.length,
         score: Math.round(winner.stats?.score ?? 0),
+        best: topScorer(humans),
         room: room.code,
         at: Date.now(),
       })
@@ -992,6 +1007,8 @@ export class Game {
         hoverT: s.hoverT,
         magnetT: s.magnetT,
         combo: this.comboView(s.combo),
+        score: s.stats.score,
+        coins: s.stats.coins,
         racers: rows,
         gaps,
         tailwind: !race.finished && race.localAssist > 0.3,
@@ -1103,6 +1120,9 @@ export class Game {
       }
       if (top) awards.push({ key, label, name: top.r.name, color: PLAYER_COLORS[top.r.colorIndex] ?? PLAYER_COLORS[0], value: fmt(top.v) });
     };
+    // points are their own contest next to the finishing time: the style winner gets the first chip
+    best('score', (r) => r.stats?.score, 'Top score', (v) => `${Math.round(v).toLocaleString('en-US')} pts`);
+    best('coins', (r) => r.stats?.coins, 'Most coins', (v) => String(v));
     best('flips', (r) => r.stats?.flips, 'Most flips', (v) => String(v));
     best('speed', (r) => (r.stats?.topSpeed ?? 0) / PX_PER_M * 3.6, 'Top speed', (v) => `${Math.round(v)} km/h`, 1);
     best('combo', (r) => r.stats?.bestCombo, 'Biggest combo', (v) => String(v));

@@ -17,6 +17,8 @@ export const ICONS = {
   soundOn: s('<path d="M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z"/><path d="M15.5 9 A4 4 0 0 1 15.5 15"/><path d="M18 6.5 A7.5 7.5 0 0 1 18 17.5"/>'),
   soundOff: s('<path d="M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z"/><path d="M16 9.5 L21 14.5 M21 9.5 L16 14.5"/>'),
   flag: s('<path d="M6 21 V3.5"/><path d="M6 4 H17 L14.5 7.5 L17 11 H6"/>'),
+  star: s('<path d="M12 3.8 L14.4 8.9 L20 9.6 L15.9 13.4 L17 19 L12 16.2 L7 19 L8.1 13.4 L4 9.6 L9.6 8.9 Z"/>'),
+  coin: s('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4.5"/>'),
   feather: s('<path d="M19.5 4.5 C12 4.5 6.5 10 6.5 17.5 L4.5 19.5"/><path d="M19.5 4.5 C19.5 12 14 17.5 6.5 17.5"/><path d="M6.5 17.5 L14 10"/>'),
   magnet: s('<path d="M6 4.5 V12 A6 6 0 0 0 18 12 V4.5"/><path d="M6 4.5 H9.5 V12 A2.5 2.5 0 0 0 14.5 12 V4.5 H18" /><path d="M6 8 H9.5 M14.5 8 H18"/>'),
   trophy: s('<path d="M7.5 4 H16.5 V9 A4.5 4.5 0 0 1 7.5 9 Z"/><path d="M7.5 6 H4.5 V7.5 A3 3 0 0 0 7.8 10.5"/><path d="M16.5 6 H19.5 V7.5 A3 3 0 0 1 16.2 10.5"/><path d="M12 13.5 V17"/><path d="M8.5 20 H15.5 L14.5 17 H9.5 Z"/>'),

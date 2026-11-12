@@ -2909,6 +2909,11 @@ kbd {
 
   .hud__top {
     top: calc(var(--safe-t) + 22px);
+    /* between the plaque (time · place · points) and the top-right buttons, not centred under the plaque */
+    left: calc(var(--safe-l) + 340px);
+    right: calc(var(--safe-r) + 170px);
+    width: auto;
+    transform: none;
   }
   .combo-anchor {
     margin-top: 10px;
@@ -3910,6 +3915,40 @@ body {
   font-size: clamp(20px, 1.9vw, 26px);
   color: var(--plate-ink);
 }
+.hud-score b {
+  font-family: var(--f-ui);
+  font-weight: 800;
+  font-size: clamp(20px, 1.9vw, 26px);
+  font-variant-numeric: tabular-nums;
+  color: var(--plate-ink);
+}
+.hud-coins {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 2px;
+  font-weight: 700;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--plate-soft);
+}
+.hud-coins .icon {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2;
+  color: #d8a21e;
+}
+.hud-score.pop b {
+  animation: score-pop 0.35s ease-out;
+}
+@keyframes score-pop {
+  40% {
+    transform: scale(1.18);
+  }
+}
+.hud-score b {
+  display: inline-block;
+}
 
 /* progress track: rider pennants and a finish flag */
 .track__line {
@@ -4221,7 +4260,8 @@ body {
     height: 14px;
   }
   .hud-time,
-  .hud-pos b {
+  .hud-pos b,
+  .hud-score b {
     font-size: 18px;
   }
   .speedo {

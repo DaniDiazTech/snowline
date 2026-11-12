@@ -46,8 +46,21 @@ export function sanitizeRecord(r) {
     length: r.length,
     players: Number.isInteger(r.players) ? clamp(r.players, 1, 32) : 1,
     score: fin(r.score) ? Math.round(clamp(r.score, 0, 1e9)) : 0,
+    best: sanitizeBest(r.best),
     room,
     at: Math.round(r.at),
+  };
+}
+
+/** The race's top scorer (optional; older records don't have it). */
+function sanitizeBest(b) {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return undefined;
+  const name = cleanText(b.name, 14);
+  if (!name || !fin(b.score)) return undefined;
+  return {
+    name,
+    colorIndex: Number.isInteger(b.colorIndex) && b.colorIndex >= 0 && b.colorIndex < PLAYER_COLORS.length ? b.colorIndex : 0,
+    score: Math.round(clamp(b.score, 0, 1e9)),
   };
 }
 

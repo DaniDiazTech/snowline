@@ -2,7 +2,7 @@
  * Gameplay features, drawn in WORLD space (camera transform already applied):
  * rocks (angular facets + snow cap), ramps (marker flags at the lip),
  * grinds (bunting rope with fluttering flags / snowy chalet roof / ice ledge),
- * pickups (spinning coins with a glint, feather + magnet in glowing bubbles)
+ * pickups (spinning coins with a glint; feather + magnet as solid badges with the HUD's glyph)
  * and campfires (flickering layered flames + warm glow).
  * Chasms are part of the terrain renderer.
  */
@@ -526,81 +526,55 @@ function coin(ctx, f, P) {
   if (g < 0.12) sparkle(ctx, x + 3 * w, y - 4, 9 * Math.sin((g / 0.12) * Math.PI), 1);
 }
 
+/** Power-up badge colours and glyphs (paths copied from src/ui/icons.js, 24 × 24). */
+const POWER_TINT = { feather: [24, 158, 150], magnet: [226, 70, 62] };
+const POWER_GLYPH_D = {
+  feather: ['M19.5 4.5 C12 4.5 6.5 10 6.5 17.5 L4.5 19.5', 'M19.5 4.5 C19.5 12 14 17.5 6.5 17.5', 'M6.5 17.5 L14 10'],
+  magnet: ['M6 4.5 V12 A6 6 0 0 0 18 12 V4.5', 'M6 4.5 H9.5 V12 A2.5 2.5 0 0 0 14.5 12 V4.5 H18', 'M6 8 H9.5 M14.5 8 H18'],
+};
+let powerGlyphs = null; // Path2D is browser-only: built on first draw
+const glyphsOf = (kind) => (powerGlyphs ||= Object.fromEntries(Object.entries(POWER_GLYPH_D).map(([k, ds]) => [k, ds.map((d) => new Path2D(d))])))[kind];
+
 function bubble(ctx, f, P) {
   const t = P.t;
   const x = f.x;
   const y = f.y + Math.sin(t * 2 + f.x * 0.03) * 4;
   const pulse = 1 + 0.05 * Math.sin(t * 4 + f.id);
-  const R = 17 * pulse;
-  const feather = f.kind === PickupKind.FEATHER;
-  const tint = feather ? [150, 235, 220] : [255, 150, 160];
-  // glow
-  const g = ctx.createRadialGradient(x, y, R * 0.3, x, y, R * 2.3);
-  g.addColorStop(0, rgba(tint, 0.35));
+  const R = 15 * pulse;
+  const kind = f.kind === PickupKind.FEATHER ? 'feather' : 'magnet';
+  const tint = POWER_TINT[kind];
+  // soft glow, so the badge reads against bright snow and night sky alike
+  const g = ctx.createRadialGradient(x, y, R * 0.6, x, y, R * 2.4);
+  g.addColorStop(0, rgba(tint, 0.4));
   g.addColorStop(1, rgba(tint, 0));
   ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.arc(x, y, R * 2.3, 0, TAU);
+  ctx.arc(x, y, R * 2.4, 0, TAU);
   ctx.fill();
-  // bubble
-  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  // solid badge with a white rim (minimal, high contrast: one colour + one white glyph)
+  ctx.fillStyle = 'rgba(10, 20, 40, 0.18)';
+  ctx.beginPath();
+  ctx.arc(x + 1, y + 2, R, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = rgba(tint);
   ctx.beginPath();
   ctx.arc(x, y, R, 0, TAU);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-  ctx.lineWidth = 1.4;
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(x, y, R * 0.75, -2.6, -1.9);
   ctx.stroke();
-  // icon
+  // the same glyph as the HUD ring, so what you grab is what lights up in the HUD
   ctx.save();
   ctx.translate(x, y);
-  if (feather) {
-    ctx.rotate(-0.6 + Math.sin(t * 2) * 0.1);
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(0, -11);
-    ctx.quadraticCurveTo(7, -4, 3, 8);
-    ctx.lineTo(0, 10);
-    ctx.lineTo(-3, 8);
-    ctx.quadraticCurveTo(-7, -4, 0, -11);
-    ctx.fill();
-    ctx.strokeStyle = rgba(mix(tint, [40, 90, 100], 0.6));
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    ctx.moveTo(0, -9);
-    ctx.lineTo(0, 13);
-    for (let i = 0; i < 4; i++) {
-      ctx.moveTo(0, -5 + i * 3.5);
-      ctx.lineTo(4 - i * 0.4, -8 + i * 3.5);
-      ctx.moveTo(0, -5 + i * 3.5);
-      ctx.lineTo(-4 + i * 0.4, -8 + i * 3.5);
-    }
-    ctx.stroke();
-  } else {
-    // horseshoe magnet
-    ctx.rotate(0.5);
-    ctx.lineCap = 'butt';
-    ctx.strokeStyle = '#e8453c';
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.arc(0, 1, 6.5, 0, Math.PI);
-    ctx.moveTo(6.5, 1);
-    ctx.lineTo(6.5, -6);
-    ctx.moveTo(-6.5, 1);
-    ctx.lineTo(-6.5, -6);
-    ctx.stroke();
-    ctx.strokeStyle = '#f2f2f2';
-    ctx.beginPath();
-    ctx.moveTo(6.5, -5);
-    ctx.lineTo(6.5, -10);
-    ctx.moveTo(-6.5, -5);
-    ctx.lineTo(-6.5, -10);
-    ctx.stroke();
-  }
+  if (kind === 'feather') ctx.rotate(Math.sin(t * 2) * 0.12);
+  const k = (R * 1.25) / 24;
+  ctx.scale(k, k);
+  ctx.translate(-12, -12);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2.6;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const p of glyphsOf(kind)) ctx.stroke(p);
   ctx.restore();
 }
 

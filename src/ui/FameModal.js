@@ -1,5 +1,5 @@
 /**
- * Hall of fame dialog: recent winners, or the fastest per course length.
+ * Hall of fame dialog: recent winners, the fastest per course length, or the top scores.
  */
 import { PLAYER_COLORS } from '../contracts.js';
 import { h, icon } from './dom.js';
@@ -12,6 +12,7 @@ const TABS = [
   { key: 'sprint', label: 'Sprint' },
   { key: 'classic', label: 'Classic' },
   { key: 'marathon', label: 'Marathon' },
+  { key: 'points', label: 'Top scores' },
 ];
 
 export class FameModal {
@@ -89,10 +90,17 @@ export class FameModal {
       return;
     }
     let rows = recs.slice();
-    if (this.tab !== 'recent') rows = rows.filter((r) => r.length === this.tab).sort((a, b) => a.timeMs - b.timeMs);
+    const points = this.tab === 'points';
+    if (points) {
+      // each race's top scorer (older records: the winner's own points)
+      rows = rows
+        .map((r) => ({ ...r, ...(r.best || { name: r.name, colorIndex: r.colorIndex, score: r.score ?? 0 }) }))
+        .filter((r) => r.score > 0)
+        .sort((a, b) => b.score - a.score);
+    } else if (this.tab !== 'recent') rows = rows.filter((r) => r.length === this.tab).sort((a, b) => a.timeMs - b.timeMs);
     if (!rows.length) {
       this.list.replaceChildren(
-        h('li', { class: 'fame__empty', 'data-testid': 'fame-empty' }, icon(ICONS.trophy, 'icon icon--lg'), h('p', {}, this.tab === 'recent' ? 'No winners yet.' : `No ${COURSE_META[this.tab]?.label || this.tab} winners yet.`), h('p', { class: 'muted' }, 'Win a race and your name lives here.'))
+        h('li', { class: 'fame__empty', 'data-testid': 'fame-empty' }, icon(ICONS.trophy, 'icon icon--lg'), h('p', {}, this.tab === 'recent' ? 'No winners yet.' : points ? 'No scores yet.' : `No ${COURSE_META[this.tab]?.label || this.tab} winners yet.`), h('p', { class: 'muted' }, points ? 'Tricks and coins earn points. The best of each race lands here.' : 'Win a race and your name lives here.'))
       );
       return;
     }
@@ -110,7 +118,9 @@ export class FameModal {
             h('span', { class: 'fame__name' }, r.name),
             h('span', { class: 'fame__meta' }, [COURSE_META[r.length]?.label || r.length, `${r.players} rider${r.players === 1 ? '' : 's'}`, relativeTime(r.at)].filter(Boolean).join(' · '))
           ),
-          h('span', { class: 'fame__nums' }, h('span', { class: 'fame__time' }, formatTime(r.timeMs)), h('span', { class: 'fame__score' }, `${r.score ?? 0} pts`))
+          points
+            ? h('span', { class: 'fame__nums' }, h('span', { class: 'fame__time' }, `${(r.score ?? 0).toLocaleString('en-US')} pts`))
+            : h('span', { class: 'fame__nums' }, h('span', { class: 'fame__time' }, formatTime(r.timeMs)), h('span', { class: 'fame__score' }, `${(r.score ?? 0).toLocaleString('en-US')} pts`))
         )
       )
     );

@@ -205,7 +205,7 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
 
 /**
  * @typedef {Object} RiderStats
- * @property {number} score       total banked trick points
+ * @property {number} score       points: banked trick combos + 10 per coin (a separate contest from finishing time)
  * @property {number} bestCombo
  * @property {number} flips
  * @property {number} grindPx
@@ -405,7 +405,8 @@ export const DEFAULT_SETTINGS = Object.freeze({ length: 'classic', weather: 'aut
  * @property {number} timeMs
  * @property {string} length        RaceSettings.length
  * @property {number} players       how many riders raced
- * @property {number} score         winner's trick score
+ * @property {number} score         winner's points
+ * @property {{name:string, colorIndex:number, score:number}} [best]  the race's top scorer (any human rider)
  * @property {string} room          room code
  * @property {number} at            epoch ms
  *

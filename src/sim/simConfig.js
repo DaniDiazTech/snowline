@@ -39,8 +39,8 @@ export const SIM = Object.freeze({
   // lets angular momentum carry on and decay; a gentle righting torque acts only near upright.
   HOLD_T: 0.16, // s the button must be held continuously before any torque (a tap = a plain jump, zero rotation)
   FLIP_RAMP_T: 0.06, // s over which the torque ramps in once HOLD_T is reached
-  FLIP_TORQUE: 70, // rad/s² of backward angular acceleration while held (the wind-up)
-  FLIP_MAX_RATE: 13, // rad/s cap on the spin (≈ 545°/s) → a held 360° takes ≈ 1.0 s
+  FLIP_TORQUE: 40, // rad/s² of backward angular acceleration while held (the wind-up)
+  FLIP_MAX_RATE: 9, // rad/s cap on the spin (≈ 515°/s) → a held 360° takes ≈ 1.0 s: too long for a plain hop
   // Released, angular momentum is conserved; the rider changes the spin rate by tucking / extending,
   // depending on where the board is in its rotation (φ = back-rotation past the last upright):
   //   φ < EXTEND_ZONE            extended: the spin slows strongly (and the righting spring acts)
@@ -129,9 +129,10 @@ export const SIM = Object.freeze({
   /* ---- speed rewards ---- */
   // Banking a combo: an instant forward kick (px/s, felt at once) plus a timed cruise boost.
   BOOST_TIERS: Object.freeze([
-    Object.freeze({ min: 25, bonus: 0.3, duration: 3.5, kick: 120 }),
-    Object.freeze({ min: 70, bonus: 0.4, duration: 7.0, kick: 170 }),
-    Object.freeze({ min: 300, bonus: 0.5, duration: 10.0, kick: 300 }),
+    // flips need a well-chosen jump now (crest, drop, ramp, pit), so each one is worth a longer boost
+    Object.freeze({ min: 25, bonus: 0.35, duration: 5.5, kick: 140 }),
+    Object.freeze({ min: 70, bonus: 0.45, duration: 9.5, kick: 190 }),
+    Object.freeze({ min: 300, bonus: 0.55, duration: 13.0, kick: 300 }),
   ]),
   BOOST_FULL_FRAC: 0.3,
   BOOST_EASE: 20, // 1/s: the applied boost eases in (~0.15 s) and out instead of switching
@@ -177,7 +178,7 @@ export const TRICKS = Object.freeze({
   BIG_AIR: 25,
   SMASH: 25, // any obstacle smashed while shielded
   LOG_HOP: 30,
-  COIN: 2,
+  COIN: 10, // points straight to the score (not the combo)
   // Small steady direct gains for the easy things (delivered like the bank kick, px/s).
   CHASM_KICK: 50,
   COIN_KICK: 5,
