@@ -892,7 +892,9 @@ export class Game {
     // frames as slowness and would drop the race quality otherwise).
     const r = this.renderer;
     const throttle = typeof r.setFrameInterval === 'function' || (r.quality && r.quality.mode !== 'auto');
-    if (typeof r.setFrameInterval === 'function') r.setFrameInterval(BACKDROP_FRAME_MS + 2);
+    // ~30 fps paced off a 60 Hz loop lands 33 or 50 ms apart: give the governor that slack, or it
+    // reads the cadence itself as slowness and lowers the menu's quality
+    if (typeof r.setFrameInterval === 'function') r.setFrameInterval((BACKDROP_FRAME_MS + 2) * 1.15);
     if (throttle && now - this.lastBackdropDraw < BACKDROP_FRAME_MS) return false;
     dtMs = this.lastBackdropDraw && now - this.lastBackdropDraw < 250 ? now - this.lastBackdropDraw : dtMs;
     this.lastBackdropDraw = now;
